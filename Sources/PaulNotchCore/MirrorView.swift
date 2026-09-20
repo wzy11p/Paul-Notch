@@ -4,15 +4,48 @@ import SwiftUI
 
 /// 镜子：摄像头实时预览。离开视图即释放摄像头（NEVER 让摄像头常驻）。
 /// 对应 TO-DO-Panel 首页的镜子组件（WebGL 水波特效不移植，保留核心预览）。
-final class MirrorCameraController: NSObject, ObservableObject, @unchecked Sendable {
+private final class MirrorCameraSessionWorker: @unchecked Sendable {
+    let session = AVCaptureSession()
+    private let queue = DispatchQueue(label: "paul-notch.mirror")
+    private var isConfigured = false
+
+    func start(completion: @escaping @Sendable (Bool) -> Void) {
+        queue.async { [self] in
+            if !isConfigured {
+                session.beginConfiguration()
+                session.sessionPreset = .high
+                guard let device = AVCaptureDevice.default(for: .video),
+                      let input = try? AVCaptureDeviceInput(device: device),
+                      session.canAddInput(input) else {
+                    session.commitConfiguration()
+                    completion(false)
+                    return
+                }
+                session.addInput(input)
+                session.commitConfiguration()
+                isConfigured = true
+            }
+            if !session.isRunning { session.startRunning() }
+            completion(true)
+        }
+    }
+
+    func stop() {
+        queue.async { [self] in
+            if session.isRunning { session.stopRunning() }
+        }
+    }
+}
+
+@MainActor
+final class MirrorCameraController: NSObject, ObservableObject {
     @Published var permissionDenied = false
     @Published private(set) var isActive = false
     @Published private(set) var isStarting = false
 
-    let session = AVCaptureSession()
-    private let sessionQueue = DispatchQueue(label: "paul-notch.mirror")
-    private var isConfigured = false
+    private let worker = MirrorCameraSessionWorker()
     private var wantsActive = false
+    var session: AVCaptureSession { worker.session }
 
     func start() {
         guard !isActive, !isStarting else { return }
@@ -24,7 +57,7 @@ final class MirrorCameraController: NSObject, ObservableObject, @unchecked Senda
             startSession()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
-                DispatchQueue.main.async {
+                Task { @MainActor [weak self] in
                     guard let self, self.wantsActive else { return }
                     if granted {
                         self.startSession()
@@ -46,39 +79,18 @@ final class MirrorCameraController: NSObject, ObservableObject, @unchecked Senda
         wantsActive = false
         isStarting = false
         isActive = false
-        sessionQueue.async { [weak self] in
-            guard let self, self.session.isRunning else { return }
-            self.session.stopRunning()
-        }
+        worker.stop()
     }
 
     private func startSession() {
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            if !self.isConfigured {
-                self.session.beginConfiguration()
-                self.session.sessionPreset = .high
-                guard let device = AVCaptureDevice.default(for: .video),
-                      let input = try? AVCaptureDeviceInput(device: device),
-                      self.session.canAddInput(input) else {
-                    self.session.commitConfiguration()
-                    DispatchQueue.main.async {
-                        self.wantsActive = false
-                        self.isStarting = false
-                        self.permissionDenied = true
-                    }
-                    return
-                }
-                self.session.addInput(input)
-                self.session.commitConfiguration()
-                self.isConfigured = true
-            }
-            if !self.session.isRunning {
-                self.session.startRunning()
-            }
-            DispatchQueue.main.async {
-                guard self.wantsActive else {
-                    self.stop()
+        worker.start { [weak self] didStart in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.wantsActive, didStart else {
+                    self.worker.stop()
+                    self.wantsActive = false
+                    self.isStarting = false
+                    self.permissionDenied = !didStart
                     return
                 }
                 self.isStarting = false
