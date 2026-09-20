@@ -1,0 +1,16 @@
+.build/
+.cache/
+dist/
+.DS_Store
+*.swp
+*.xcuserstate
+xcuserdata/
+DerivedData/
+.env
+.env.*
+*.p12
+*.pfx
+*.pem
+*.key
+*.cer
+*.mobileprovision

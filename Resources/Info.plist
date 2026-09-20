@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>PaulNotch</string>
+    <key>CFBundleIconFile</key><string>PaulNotch</string>
+    <key>CFBundleIdentifier</key><string>io.github.wzy11p.PaulNotch</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+    <key>CFBundleName</key><string>Paul Notch</string>
+    <key>CFBundleDisplayName</key><string>Paul Notch</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleSignature</key><string>????</string>
+    <key>CFBundleShortVersionString</key><string>1.0.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSCameraUsageDescription</key><string>Paul Notch 需要使用摄像头来显示「镜子」预览。</string>
+    <key>NSMicrophoneUsageDescription</key><string>Paul Notch 需要使用麦克风来录音并生成转写文本。</string>
+    <key>NSAppleEventsUsageDescription</key><string>你点击播放控件时，应用需要控制所选音乐播放器；QQ 音乐使用「系统事件」操作播放菜单，汽水音乐使用播放快捷键。</string>
+</dict>
+</plist>

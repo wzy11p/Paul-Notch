@@ -1,0 +1,3 @@
+import PaulNotchCore
+
+PaulNotchApplication.run()
