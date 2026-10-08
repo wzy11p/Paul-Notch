@@ -12,8 +12,18 @@ jobs:
       - name: Build
         run: swift build
       - name: Test
-        run: swift test
+        run: |
+          test_data=$(mktemp -d /tmp/paul-ci-tests.XXXXXX)
+          PAUL_PREVIEW_DIRECTORY="$test_data" swift test
       - name: Safety fallback
         run: zsh scripts/test-safety.sh
       - name: Public boundaries
         run: zsh scripts/test-public-boundaries.sh
+      - name: Public runtime compatibility
+        run: zsh scripts/test-public-runtime.sh
+      - name: Quota model and reset boundaries
+        run: |
+          zsh scripts/test-quota-layout.sh
+          zsh scripts/test-desktop-quota.sh
+          zsh scripts/test-muse-quota.sh
+          zsh scripts/test-time-plan.sh

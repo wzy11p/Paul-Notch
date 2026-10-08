@@ -5,6 +5,16 @@
 Native workspace components include adaptations identified in source comments.
 Source: https://github.com/xiaopu-ai/TO-DO-Panel
 
+`WorkspacePanelMotion` adapts the collapse-generation and bounded-watchdog
+mechanisms from v1.1.2 (`5927fb84bb3e962e77731666126c6505e7251813`, `main.js`).
+The native AppKit implementation does not bundle Electron, copy its workspace,
+or import the upstream renderer's rapid-toggle queue.
+
+`QuotaInteractionMotion` adapts the 140ms feedback and 180ms content timing
+curves from the same version's `renderer/styles.css`. Native responder restoration
+borrows the stable-identity focus principle from `renderer/app.js`; it does not
+copy DOM controls, CSS transforms, or the Electron runtime.
+
 MIT License
 
 Copyright (c) 2026 TO-DO Panel contributors
