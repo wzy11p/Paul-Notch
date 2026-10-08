@@ -14,6 +14,7 @@ struct ClipboardHistoryView: View {
             }
             history
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var captureControls: some View {
@@ -87,7 +88,9 @@ struct ClipboardHistoryView: View {
                         .foregroundStyle(IslandTheme.text2)
                         .multilineTextAlignment(.center)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(16)
+                .frame(maxWidth: .infinity, minHeight: 120)
+                .background(IslandTheme.surface1, in: RoundedRectangle(cornerRadius: 12))
             } else {
                 ScrollView {
                     HStack(alignment: .top, spacing: 10) {

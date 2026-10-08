@@ -6,6 +6,7 @@ struct LinksView: View {
     @ObservedObject var store: LinksStore
     @ObservedObject var settings: AppSettingsStore
     @State private var newURL = ""
+    @State private var isSaving = false
     @State private var isHoveredID: UUID?
 
     var body: some View {
@@ -21,7 +22,7 @@ struct LinksView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .clipShape(Circle())
-                .disabled(newURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(isSaving || newURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .help("保存链接")
             }
             .inputStyle()
@@ -95,7 +96,7 @@ struct LinksView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("在浏览器打开")
-                Button(role: .destructive) { store.delete(link) } label: {
+                Button(role: .destructive) { Task { await store.delete(link) } } label: {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.borderless)
@@ -114,7 +115,13 @@ struct LinksView: View {
     }
 
     private func addLink() {
-        store.add(rawURL: newURL)
-        newURL = ""
+        guard !isSaving else { return }
+        let submitted = newURL
+        isSaving = true
+        Task {
+            let saved = await store.add(rawURL: submitted)
+            if saved && newURL == submitted { newURL = "" }
+            isSaving = false
+        }
     }
 }

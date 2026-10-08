@@ -6,7 +6,7 @@ private enum MemoSection: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
-private enum AppTab: String, CaseIterable, Identifiable {
+enum AppTab: String, CaseIterable, Identifiable {
     case memo = "备忘录"
     case clipboard = "复制记录"
     case home = "首页"
@@ -106,16 +106,22 @@ struct IslandView: View {
     @ObservedObject var linksStore: LinksStore
     @ObservedObject var commandsStore: CommandsStore
     @ObservedObject var pomodoroStore: PomodoroStore
+    @ObservedObject var timePlanStore: TimePlanStore
     @ObservedObject var recordingsStore: RecordingStore
     @ObservedObject var credentialsStore: CredentialsStore
     @ObservedObject var musicService: MusicService
     @ObservedObject var windowListService: WindowListService
     @ObservedObject var notifyServer: AgentNotifyServer
     @ObservedObject var codexStatusStore: CodexStatusStore
+    @ObservedObject var quotaConnections: QuotaConnectionsStore
     @ObservedObject var appSettings: AppSettingsStore
     @ObservedObject var panelMetrics: PanelMetrics
+    @ObservedObject var navigation: WorkspaceNavigation
     let onOpenDisplaySettings: () -> Void
     let onCloseWorkspace: () -> Void
+    var onGeometryBegin: () -> Void = {}
+    var onGeometryCommit: (NSRect, NSScreen) -> Void = { _, _ in }
+    var onGeometryReset: () -> Void = {}
     @State private var title = ""
     @State private var hasDueDate = false
     @State private var dueDate = Date().addingTimeInterval(3600)
@@ -126,7 +132,10 @@ struct IslandView: View {
     @State private var showsCategoryPicker = false
     @State private var showsEmptyTrashConfirmation = false
     @State private var section: MemoSection = .tasks
-    @State private var selectedTab: AppTab = .memo
+    private var selectedTab: AppTab {
+        get { navigation.selectedTab }
+        nonmutating set { navigation.select(newValue) }
+    }
     @State private var completionFilter: TaskCompletionFilter = .incomplete
     @FocusState private var titleFocused: Bool
 
@@ -139,63 +148,79 @@ struct IslandView: View {
                 .stroke(IslandTheme.hairline, lineWidth: 1)
 
             VStack(spacing: IslandTheme.s3) {
-                topbar
-                    .frame(height: IslandTheme.topbarHeight)
+                if navigation.isQuotaHome {
+                    QuotaHomeView(codexStatus: codexStatusStore, connections: quotaConnections, tools: quotaTools,
+                                  onSelectTool: openQuotaTool, onClose: onCloseWorkspace, navigation: navigation)
+                } else {
+                    topbar
+                        .frame(height: IslandTheme.topbarHeight)
 
-                switch selectedTab {
-                case .memo:
-                    if section == .tasks {
-                        if appSettings.memoCompletedEnabled && !store.memoEditingActive { completionTabBar }
-                        MemoTaskWorkspace(store: store, settings: appSettings,
-                                          completed: completionFilter == .completed)
-                    } else {
-                        content
+                    switch selectedTab {
+                    case .memo:
+                        if section == .tasks {
+                            if appSettings.memoCompletedEnabled && !store.memoEditingActive { completionTabBar }
+                            MemoTaskWorkspace(store: store, settings: appSettings,
+                                              completed: completionFilter == .completed)
+                        } else {
+                            content
+                        }
+                    case .clipboard:
+                        ClipboardHistoryView(store: clipboardStore, settings: appSettings)
+                    case .home:
+                        HomeView(
+                            tasks: store,
+                            notes: noteStore,
+                            clipboard: clipboardStore,
+                            links: linksStore,
+                            credentials: credentialsStore,
+                            pomodoro: pomodoroStore,
+                            timePlan: timePlanStore,
+                            music: musicService,
+                            windows: windowListService,
+                            commands: commandsStore,
+                            recordings: recordingsStore,
+                            notifyServer: notifyServer,
+                            codexStatus: codexStatusStore,
+                            panelMetrics: panelMetrics,
+                            settings: appSettings
+                        )
+                    case .links:
+                        LinksView(store: linksStore, settings: appSettings)
+                    case .recordings:
+                        RecordingsView(store: recordingsStore)
+                    case .credentials:
+                        CredentialsView(store: credentialsStore, settings: appSettings)
+                    case .music: standaloneModule(.music)
+                    case .pomodoro: standaloneModule(.pomodoro)
+                    case .recorder: standaloneModule(.recorder)
+                    case .windows: standaloneModule(.windows)
+                    case .mirror: standaloneModule(.mirror)
+                    case .note: standaloneModule(.note)
+                    case .commands: standaloneModule(.commands)
+                    case .clock: standaloneModule(.clock)
+                    case .calendar: standaloneModule(.calendar)
+                    case .completions: standaloneModule(.completions)
+                    case .settings:
+                        EmptyView()
                     }
-                case .clipboard:
-                    ClipboardHistoryView(store: clipboardStore, settings: appSettings)
-                case .home:
-                    HomeView(
-                        tasks: store,
-                        notes: noteStore,
-                        clipboard: clipboardStore,
-                        links: linksStore,
-                        credentials: credentialsStore,
-                        pomodoro: pomodoroStore,
-                        music: musicService,
-                        windows: windowListService,
-                        commands: commandsStore,
-                        recordings: recordingsStore,
-                        notifyServer: notifyServer,
-                        codexStatus: codexStatusStore,
-                        panelMetrics: panelMetrics,
-                        settings: appSettings
-                    )
-                case .links:
-                    LinksView(store: linksStore, settings: appSettings)
-                case .recordings:
-                    RecordingsView(store: recordingsStore)
-                case .credentials:
-                    CredentialsView(store: credentialsStore, settings: appSettings)
-                case .music: standaloneModule(.music)
-                case .pomodoro: standaloneModule(.pomodoro)
-                case .recorder: standaloneModule(.recorder)
-                case .windows: standaloneModule(.windows)
-                case .mirror: standaloneModule(.mirror)
-                case .note: standaloneModule(.note)
-                case .commands: standaloneModule(.commands)
-                case .clock: standaloneModule(.clock)
-                case .calendar: standaloneModule(.calendar)
-                case .completions: standaloneModule(.completions)
-                case .settings:
-                    EmptyView()
                 }
             }
-            .padding(.horizontal, IslandTheme.s6)
-            .padding(.top, panelMetrics.topInset)
-            .padding(.bottom, IslandTheme.s4)
+            .padding(.horizontal, navigation.isQuotaHome ? IslandTheme.s3 : IslandTheme.s6)
+            .padding(.top, panelMetrics.topInset + 20)
+            .padding(.bottom, navigation.isQuotaHome ? 16 : IslandTheme.s4)
             .frame(maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .top) {
+            WorkspaceWindowGrip(kind: .move, onBegin: onGeometryBegin,
+                                onCommit: onGeometryCommit, onReset: onGeometryReset)
+                .frame(width: 112, height: 18).padding(.top, panelMetrics.topInset)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            WorkspaceWindowGrip(kind: .resize, onBegin: onGeometryBegin,
+                                onCommit: onGeometryCommit, onReset: onGeometryReset)
+                .frame(width: 28, height: 28).padding(4)
+        }
         .preferredColorScheme(.dark)
         .tint(IslandTheme.accentBlue)
         .onAppear {
@@ -210,7 +235,7 @@ struct IslandView: View {
                 completionFilter = .incomplete
                 // MemoTaskWorkspace consumes the pending create intent on mount.
             } else if appSettings.workspacePlacement(for: .memo) == .home {
-                selectedTab = .home
+                navigation.showToolsHome()
             } else if let first = visibleTabs.first {
                 selectedTab = first
             }
@@ -238,6 +263,20 @@ struct IslandView: View {
         }
     }
 
+    private var quotaTools: [QuotaOverviewTool] {
+        [.init(id: "tools-home", title: "任务与工具", systemImage: "square.grid.2x2")]
+        + visibleTabs.filter { $0 != .home }.map {
+            .init(id: $0.feature.rawValue, title: $0.rawValue, systemImage: $0.systemImage)
+        }
+        + [.init(id: "app-settings", title: "设置…", systemImage: "gearshape")]
+    }
+
+    private func openQuotaTool(_ id: String) {
+        if id == "tools-home" { navigation.showToolsHome() }
+        else if id == "app-settings" { onOpenDisplaySettings() }
+        else if let feature = AppSettingsStore.Feature(rawValue: id) { navigation.select(AppTab(feature: feature)) }
+    }
+
     private func standaloneModule(_ module: AppSettingsStore.HomeModule) -> some View {
         HomeView(
             tasks: store,
@@ -246,6 +285,7 @@ struct IslandView: View {
             links: linksStore,
             credentials: credentialsStore,
             pomodoro: pomodoroStore,
+            timePlan: timePlanStore,
             music: musicService,
             windows: windowListService,
             commands: commandsStore,
@@ -372,9 +412,12 @@ struct IslandView: View {
     }
 
     private var visibleTabs: [AppTab] {
-        appSettings.orderedVisibleFeatures
+        var tabs = appSettings.orderedVisibleFeatures
             .filter { $0 != .settings }
             .map { AppTab(feature: $0) }
+        // Quota Home is the shell landing page, independent of old widget placement preferences.
+        if !tabs.contains(.home) { tabs.insert(.home, at: 0) }
+        return tabs
     }
 
     private var completionTabBar: some View {

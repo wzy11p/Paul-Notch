@@ -42,15 +42,21 @@ final class ClipboardStore: ObservableObject {
     }
 
     func copy(_ entry: ClipboardEntry) {
-        pasteboard.clearContents()
         switch entry.kind {
         case .text:
+            pasteboard.clearContents()
             pasteboard.setString(entry.text ?? "", forType: .string)
         case .image:
             guard let fileName = entry.imageFileName,
-                  let data = try? Data(contentsOf: imageFolderURL.appendingPathComponent(fileName)) else { return }
+                  let data = try? Data(contentsOf: imageFolderURL.appendingPathComponent(fileName)),
+                  NSImage(data: data) != nil else {
+                errorMessage = "图片缓存已丢失或无法读取，未更改当前剪贴板。请从原处重新复制图片。"
+                return
+            }
+            pasteboard.clearContents()
             pasteboard.setData(data, forType: .png)
         }
+        if !persistenceBlocked { errorMessage = nil }
         lastChangeCount = pasteboard.changeCount
         moveToFront(entry.id)
     }

@@ -8,6 +8,7 @@ struct AmbientQuotaLabel: View {
     let isFullScreen: Bool
     let color: Color
     let secondaryColor: Color
+    var comparison: String = ""
 
     private var numberFont: Font {
         .system(size: isFullScreen ? 9 : 10, weight: .semibold, design: .rounded)
@@ -15,18 +16,21 @@ struct AmbientQuotaLabel: View {
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 1) {
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
             Text(period)
-                .font(.system(size: 7, weight: .medium, design: .rounded))
+                .font(.system(size: period.count > 2 ? 6 : 7, weight: .medium, design: .rounded))
                 .foregroundStyle(secondaryColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .frame(maxWidth: 12)
             HStack(alignment: .firstTextBaseline, spacing: 0) {
                 ZStack(alignment: .trailing) {
                     Text("100").hidden().accessibilityHidden(true)
-                    Text("\(min(100, max(0, remaining)))")
+                    Text("\(comparison)\(min(100, max(0, remaining)))")
                 }
                 .font(numberFont)
                 Text("%")
-                    .font(.system(size: 7, weight: .semibold, design: .rounded))
+                    .font(.system(size: 6, weight: .semibold, design: .rounded))
             }
             .foregroundStyle(color)
         }

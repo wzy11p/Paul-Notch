@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let linksStore = LinksStore()
     private let commandsStore = CommandsStore()
     private let pomodoroStore = PomodoroStore()
+    private let timePlanStore = TimePlanStore(repository: LocalTimePlanRepository())
     private let recordingsStore = RecordingStore()
     private let credentialsStore = CredentialsStore()
     private let musicService = MusicService()
@@ -26,9 +27,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let windowListService = WindowListService()
     private let notifyServer = AgentNotifyServer()
     private let codexStatusStore = CodexStatusStore()
+    private let quotaConnections = QuotaConnectionsStore(defaults: AppEnvironment.defaults,
+        vault: QuotaCredentialVault(), allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled, transport: QuotaHTTPClient.fetch,
+        miniMax: MiniMaxWalletStore(defaults: AppEnvironment.defaults,
+            vault: QuotaCredentialVault(service: .miniMaxCN), allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
+            transport: QuotaHTTPClient.fetch),
+        cursorAccount: CursorQuotaAccountStore(defaults: AppEnvironment.defaults,
+            vault: QuotaCredentialVault(service: .cursorAccount), allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
+            transport: CursorQuotaHTTPClient.fetch),
+        websiteMemberships: [
+            "muse": WebsiteQuotaStore(provider: .muse, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
+                factory: { WebsiteQuotaBrowser(provider: $0, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled) },
+                defaults: AppEnvironment.ownedWebsiteDefaults,
+                persistentFactory: { WebsiteQuotaBrowser(provider: $0, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
+                    profileIdentifier: $1) },
+                removeProfile: WebsiteQuotaBrowser.removeOwnedProfile),
+            "doubao": WebsiteQuotaStore(provider: .doubao, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
+                factory: { WebsiteQuotaBrowser(provider: $0, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled) },
+                defaults: AppEnvironment.ownedWebsiteDefaults,
+                persistentFactory: { WebsiteQuotaBrowser(provider: $0, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
+                    profileIdentifier: $1) },
+                removeProfile: WebsiteQuotaBrowser.removeOwnedProfile),
+            "minimax-audio": WebsiteQuotaStore(provider: .miniMaxCN, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
+                factory: { WebsiteQuotaBrowser(provider: $0, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled) },
+                defaults: AppEnvironment.ownedWebsiteDefaults,
+                persistentFactory: { WebsiteQuotaBrowser(provider: $0, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
+                    profileIdentifier: $1) },
+                removeProfile: WebsiteQuotaBrowser.removeOwnedProfile)])
     private let aiApplicationDetector = AIApplicationDetector()
     private let appSettings = AppSettingsStore()
     private let panelMetrics = PanelMetrics()
+    private let workspaceNavigation = WorkspaceNavigation()
+    private let workspaceGeometry = WorkspacePanelGeometry(defaults: AppEnvironment.defaults)
     private let ambientPresentation = AmbientNotchPresentation()
     private lazy var reminderScheduler = TaskReminderScheduler { [weak self] in
         self?.store.tasks ?? []
@@ -50,8 +80,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var globalHotKey: GlobalHotKey?
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
-    private var isAnimatingIn = false
-    private var isAnimatingOut = false
+    private let workspaceMotion = WorkspacePanelMotion()
+    private var isAnimatingIn: Bool { workspaceMotion.direction == .opening }
+    private var isAnimatingOut: Bool { workspaceMotion.direction == .closing }
     private var isPinnedByHotKey = false
     private var hasPointerEnteredAfterHotKey = false
     private var pointerOutsideSince: Date?
@@ -69,15 +100,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // No timer or clipboard content capture starts when both types are disabled.
         clipboardStore.startMonitoring()
         setupPanels()
+        quotaConnections.start()
+        workspaceNavigation.onLayoutChange = { [weak self] in self?.resizeWorkspaceForCurrentPage() }
         showAmbientPanel(on: preferredAmbientScreen())
         setupMenuBar()
+        // Display/Space tracking belongs to the panel lifecycle in every profile.
+        // Start it before the isolated-workspace return without enabling legacy services.
+        startAmbientEnvironmentTracking()
         if presentationModeEnabled { startPresentationTracking() }
         if Self.memoPreviewFileURL != nil {
             // Every store uses the isolated environment; background services remain opt-in.
             store.load()
+            Task { await timePlanStore.load() }
             setupDismissMonitors()
-            if ProcessInfo.processInfo.arguments.contains("--preview-live-codex")
-                || Bundle.main.object(forInfoDictionaryKey: "PaulPreviewLiveCodex") as? Bool == true {
+            if AppEnvironment.codexStatusReadsEnabled {
                 codexStatusStore.start()
             }
             if !presentationModeEnabled {
@@ -90,21 +126,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupGlobalHotKey()
         setupDismissMonitors()
         store.load()
+        Task { await timePlanStore.load() }
         reminderScheduler.start()
         notifyServer.start()
         codexStatusStore.start()
         aiApplicationDetector.scan()
-        startAmbientEnvironmentTracking()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard noteStore.isLoaded else { return .terminateNow }
         Task {
-            await noteStore.flushDraft()
-            if let error = noteStore.errorMessage {
+            if noteStore.isLoaded { await noteStore.flushDraft() }
+            let planningDraftSaved = TimePlanningDraftCoordinator.shared.flush()
+            let planSaved = await timePlanStore.flushPendingWrites()
+            let linksSaved = await linksStore.flushPendingWrites()
+            if let error = Self.terminationSaveError(
+                noteError: noteStore.errorMessage, linksSaved: linksSaved, linkError: linksStore.errorMessage
+            ) {
                 let alert = NSAlert()
-                alert.messageText = "随笔草稿尚未保存"
+                alert.messageText = "有内容尚未保存"
                 alert.informativeText = error
+                alert.addButton(withTitle: "返回检查")
+                alert.runModal()
+                sender.reply(toApplicationShouldTerminate: false)
+            } else if !planningDraftSaved || !planSaved {
+                let alert = NSAlert()
+                alert.messageText = "时间规划尚未保存"
+                alert.informativeText = planningDraftSaved
+                    ? (timePlanStore.errorMessage ?? "请返回时间规划重试保存。")
+                    : "输入草稿尚未写入本机，请返回时间规划重试保存。"
                 alert.addButton(withTitle: "返回检查")
                 alert.runModal()
                 sender.reply(toApplicationShouldTerminate: false)
@@ -115,7 +164,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
+    static func terminationSaveError(noteError: String?, linksSaved: Bool, linkError: String?) -> String? {
+        noteError ?? (linksSaved ? nil : (linkError ?? "链接尚未保存，请返回链接页面重试。"))
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        workspaceMotion.cancel()
         presentationTrackingTimer?.invalidate()
         clipboardStore.stopMonitoring()
         pointerTrackingTimer?.invalidate()
@@ -125,6 +179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reminderScheduler.stop()
         notifyServer.stop()
         codexStatusStore.stop()
+        quotaConnections.stop()
         globalHotKey?.invalidate()
         if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
@@ -153,18 +208,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             linksStore: linksStore,
             commandsStore: commandsStore,
             pomodoroStore: pomodoroStore,
+            timePlanStore: timePlanStore,
             recordingsStore: recordingsStore,
             credentialsStore: credentialsStore,
             musicService: musicService,
             windowListService: windowListService,
             notifyServer: notifyServer,
             codexStatusStore: codexStatusStore,
+            quotaConnections: quotaConnections,
             appSettings: appSettings,
             panelMetrics: panelMetrics,
+            navigation: workspaceNavigation,
             onOpenDisplaySettings: { [weak self] in self?.openSettingsFromPanel() },
-            onCloseWorkspace: { [weak self] in self?.closeWorkspaceExplicitly() }
+            onCloseWorkspace: { [weak self] in self?.closeWorkspaceExplicitly() },
+            onGeometryBegin: { [weak self] in
+                guard let self else { return }
+                self.workspaceMotion.cancel()
+                self.drawerView.setFrameOrigin(.zero)
+                self.isPinnedByHotKey = true
+            },
+            onGeometryCommit: { [weak self] frame, screen in
+                guard let self else { return }
+                self.workspaceGeometry.record(frame, route: self.workspaceNavigation.layoutKey, screen: screen.frame)
+            },
+            onGeometryReset: { [weak self] in
+                guard let self else { return }
+                self.workspaceGeometry.reset()
+                self.resizeWorkspaceForCurrentPage()
+            }
         )
         let workspaceHostingView = NSHostingView(rootView: workspace)
+        // The drawer's frame is owned by showPanel, not SwiftUI's minimum-size
+        // probe (wrapped text measured at zero width can request a screen-tall window).
+        workspaceHostingView.sizingOptions = []
         workspaceHostingView.wantsLayer = true
         workspaceHostingView.layer?.backgroundColor = NSColor.clear.cgColor
         workspaceHostingView.layer?.cornerCurve = .continuous
@@ -189,6 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         let ambient = AmbientNotchView(
             codexStatus: codexStatusStore,
+            connections: quotaConnections,
             presentation: ambientPresentation,
             onOpen: { [weak self] in
                 self?.toggleAmbientClick()
@@ -274,6 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startAmbientEnvironmentTracking() {
+        ambientPresentation.observeForeground(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         let workspaceCenter = NSWorkspace.shared.notificationCenter
         workspaceCenter.addObserver(
             self,
@@ -297,6 +375,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func ambientEnvironmentDidChange(_ notification: Notification) {
+        // Resolve the event identity immediately, independently of geometry's
+        // delayed settling. Paul/login prompts cannot erase the last AI source.
+        let foreground = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            ?? NSWorkspace.shared.frontmostApplication
+        ambientPresentation.observeForeground(bundleIdentifier: foreground?.bundleIdentifier)
         refreshAmbientEnvironment()
 
         // Space and full-screen window metadata can settle one run-loop later
@@ -329,7 +412,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Pointer movement may only keep an already-open panel visible or hide it.
         // Opening is exclusively handled by click, shortcut, or menu actions.
         guard panelPresentationMode == .workspace, panel.isVisible else { return }
-        if store.memoEditingActive || noteStore.isEditing {
+        if store.memoEditingActive || noteStore.isEditing || timePlanStore.isEditing {
             pointerOutsideSince = nil
             return
         }
@@ -363,13 +446,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func toggleAmbientClick() {
         guard let screen = ambientPanel.screen ?? preferredAmbientScreen() else { return }
         // Hover is artwork feedback only. Every deliberate click toggles the workspace.
-        // Ignore repeated presses during dismissal so two animations cannot race.
-        guard !isAnimatingOut else { return }
-        if panelPresentationMode == .workspace {
+        // Toggle the most recent intent, including a dismissal in flight.
+        if panelPresentationMode == .workspace && !isAnimatingOut {
             isPinnedByHotKey = false
             hidePanel(on: screen)
         } else {
             isPinnedByHotKey = true
+            // Reversing a close continues the same workspace, including drafts
+            // and scroll position. Only a fully closed panel starts at Home.
+            if panelPresentationMode == .ambient { workspaceNavigation.openFromNotch() }
             showPanel(on: screen)
         }
     }
@@ -386,95 +471,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             screen.frame.maxY - screen.visibleFrame.maxY
         )
         panelMetrics.topInset = menuBarHeight + 4
-        let size = NSSize(
-            width: min(IslandTheme.panelWidth, screen.frame.width - 24),
-            height: menuBarHeight + 4 + IslandTheme.topbarHeight + IslandTheme.s3
-                + IslandTheme.panelContentHeight + IslandTheme.s4
-        )
-        let x = screen.frame.midX - size.width / 2
-        let expandedY = screen.frame.maxY - size.height
-        let targetFrame = NSRect(origin: NSPoint(x: x, y: expandedY), size: size)
+        let targetFrame = workspaceGeometry.frame(navigation: workspaceNavigation,
+            topInset: panelMetrics.topInset, screen: screen.frame)
+        let size = targetFrame.size
 
         // If the pointer reaches the notch on another display while the drawer is
         // already visible, move it to that display instead of leaving it behind.
         if panelPresentationMode == .workspace && panel.isVisible && !isAnimatingOut {
             if abs(panel.frame.origin.x - targetFrame.origin.x) > 0.5
                 || abs(panel.frame.origin.y - targetFrame.origin.y) > 0.5
-                || abs(panel.frame.width - targetFrame.width) > 0.5 {
+                || abs(panel.frame.width - targetFrame.width) > 0.5
+                || abs(panel.frame.height - targetFrame.height) > 0.5 {
                 panel.setFrame(targetFrame, display: true)
             }
             return
         }
 
-        isAnimatingIn = true
-        isAnimatingOut = false
+        let isReversingClose = panelPresentationMode == .workspace && isAnimatingOut && panel.isVisible
         panelPresentationMode = .workspace
         // Keep the real window in its final position. Only its clipped content
         // moves, avoiding off-screen NSPanel frame constraints near the notch.
-        panel.setFrame(targetFrame, display: false)
-        drawerView.frame = NSRect(origin: NSPoint(x: 0, y: size.height - 42), size: size)
+        if !isReversingClose {
+            panel.setFrame(targetFrame, display: false)
+            drawerView.frame = NSRect(origin: NSPoint(x: 0, y: size.height - 42), size: size)
+        }
+        panel.ignoresMouseEvents = false
         panel.alphaValue = 1
         panel.orderFrontRegardless()
-        musicService.workspaceDidOpen()
+        if !isReversingClose { musicService.workspaceDidOpen() }
         ambientPanel.orderFrontRegardless()
         ambientPanel.order(.above, relativeTo: panel.windowNumber)
         startPointerTracking()
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.28
-            context.timingFunction = CAMediaTimingFunction(
-                controlPoints: 0.16,
-                1,
-                0.3,
-                1
-            )
-            self.drawerView.animator().setFrameOrigin(.zero)
-        } completionHandler: { [weak self] in
-            Task { @MainActor in
-                guard let self,
-                      self.panelPresentationMode == .workspace,
-                      !self.isAnimatingOut else { return }
-                self.isAnimatingIn = false
-                self.checkPointer()
-            }
+        workspaceMotion.move(drawerView, to: .zero, direction: .opening) { [weak self] in
+            guard let self, self.panelPresentationMode == .workspace else { return }
+            self.resizeWorkspaceForCurrentPage()
+            self.checkPointer()
         }
     }
 
+    private func resizeWorkspaceForCurrentPage() {
+        guard panelPresentationMode == .workspace, panel.isVisible, !isAnimatingIn, !isAnimatingOut,
+              let screen = panel.screen ?? preferredAmbientScreen() else { return }
+        // AppKit still owns the frame. Only an explicit page change selects a new
+        // bounded size; account counts and text wrapping can never grow the window.
+        showPanel(on: screen)
+    }
+
     private func hidePanel(on _: NSScreen) {
-        guard panelPresentationMode == .workspace else { return }
+        guard panelPresentationMode == .workspace, !isAnimatingOut else { return }
         Task { await noteStore.flushDraft() }
         pointerOutsideSince = nil
         panelMetrics.panelWillHide()
-        isAnimatingIn = false
-        isAnimatingOut = true
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.22
-            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-            self.drawerView.animator().setFrameOrigin(
-                NSPoint(x: 0, y: self.panel.frame.height - 42)
+        // The fading workspace must not intercept clicks on the app below it.
+        // The separate quota shelf remains clickable to reverse this dismissal.
+        panel.ignoresMouseEvents = true
+        workspaceMotion.move(drawerView, to: NSPoint(x: 0, y: panel.frame.height - 42),
+                             direction: .closing) { [weak self] in
+            guard let self, self.panelPresentationMode == .workspace else { return }
+            self.store.requestMemoListReset()
+            self.showAmbientPanel(
+                on: self.ambientPanel.screen ?? self.panel.screen ?? self.preferredAmbientScreen()
             )
-        } completionHandler: { [weak self] in
-            Task { @MainActor in
-                guard let self,
-                      self.panelPresentationMode == .workspace,
-                      self.isAnimatingOut else { return }
-                self.isAnimatingOut = false
-                self.store.requestMemoListReset()
-                self.showAmbientPanel(
-                    on: self.ambientPanel.screen ?? self.panel.screen ?? self.preferredAmbientScreen()
-                )
-            }
         }
     }
 
     private func showAmbientPanel(on screen: NSScreen?) {
         guard let screen else { return }
+        workspaceMotion.cancel()
         panelPresentationMode = .ambient
-        isAnimatingIn = false
-        isAnimatingOut = false
+        workspaceNavigation.closeQuotaConnections()
         pointerOutsideSince = nil
         pointerTrackingTimer?.invalidate()
         pointerTrackingTimer = nil
         panel.orderOut(nil)
+        panel.ignoresMouseEvents = false
 
         let geometry = ambientGeometry(on: screen)
         ambientPresentation.centerGapWidth = geometry.centerGapWidth
@@ -710,11 +780,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func dismissHotKeyPanelIfClickedOutside(at pointer: NSPoint) {
-        if presentationModeEnabled && (store.memoEditingActive || noteStore.isEditing) { return }
+        if presentationModeEnabled && (store.memoEditingActive || noteStore.isEditing || timePlanStore.isEditing) { return }
         // An IME candidate panel may belong to the input-method process, not our
         // window list. Do not dismiss the note beneath a candidate-selection click.
-        guard !store.memoEditingActive, noteStore.composingDraftID == nil else { return }
-        guard panelPresentationMode == .workspace, (isPinnedByHotKey || noteStore.isEditing), panel.isVisible else { return }
+        guard !store.memoEditingActive, noteStore.composingDraftID == nil, !timePlanStore.isEditing else { return }
+        guard panelPresentationMode == .workspace, (isPinnedByHotKey || noteStore.isEditing || timePlanStore.isEditing), panel.isVisible else { return }
         guard !isInsideDrawerOrPopover(pointer),
               let screen = screenContainingMouse() ?? NSScreen.main else {
             hasPointerEnteredAfterHotKey = true
@@ -773,8 +843,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func concealForPresentation() {
         Task { await noteStore.flushDraft() }
-        isAnimatingIn = false
-        isAnimatingOut = false
+        workspaceMotion.cancel()
         isPinnedByHotKey = false
         panelPresentationMode = .ambient
         pointerOutsideSince = nil
@@ -782,6 +851,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pointerTrackingTimer = nil
         panelMetrics.panelWillHide()
         panel.orderOut(nil)
+        panel.ignoresMouseEvents = false
         ambientPanel.orderOut(nil)
         revealPolicy.reset()
     }
@@ -794,7 +864,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pointer = NSEvent.mouseLocation
         let frame = ambientGeometry(on: screen).frame
         let visible = ambientPanel.isVisible || panel.isVisible
-        let editing = panel.isVisible && (store.memoEditingActive || noteStore.isEditing || noteStore.composingDraftID != nil)
+        let editing = panel.isVisible && (store.memoEditingActive || noteStore.isEditing || timePlanStore.isEditing || noteStore.composingDraftID != nil)
         let action = revealPolicy.update(now: ProcessInfo.processInfo.systemUptime,
             region: NSStringFromRect(screen.frame), insideTrigger: frame.contains(pointer),
             insideVisibleSurface: isInsideDrawerOrPopover(pointer), visible: visible, editing: editing)
@@ -897,7 +967,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func toggleHotKeyPanel() {
         guard let screen = screenContainingMouse() ?? NSScreen.main else { return }
-        if panelPresentationMode == .workspace && panel.isVisible && isPinnedByHotKey {
+        if panelPresentationMode == .workspace && panel.isVisible && isPinnedByHotKey && !isAnimatingOut {
             isPinnedByHotKey = false
             hasPointerEnteredAfterHotKey = false
             hidePanel(on: screen)
@@ -923,6 +993,7 @@ final class IslandPanel: NSPanel {
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Accessory panels have no application Edit menu to forward these commands.
+        if QuotaInteractiveWebView.performEditingKeyEquivalent(event, in: self) { return true }
         if event.modifierFlags.contains(.command), let editor = firstResponder as? NSTextView {
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "a": editor.selectAll(nil); return true

@@ -9,4 +9,8 @@
 5. 界面改动请说明键盘、鼠标、空状态、错误状态与权限拒绝情况的验证方式。
 6. 提交 Pull Request，描述目的、行为变化和实际运行的验证命令。
 
+额度更新还需运行 `zsh scripts/test-public-runtime.sh`、`zsh scripts/test-public-boundaries.sh` 和适用独立回归。原生窗口测试需要交互式 macOS 会话；Command Line Tools 执行 0 个 XCTest 时应明确说明。
+
+保留公开构建入口和数据路径。不要为了可移植构建放宽凭证组件身份校验；连接与发行边界见 [说明](docs/QUOTA_CONNECTIONS.md)。
+
 请勿提交个人任务、笔记、剪贴板内容、API 密钥、签名证书、私钥或本机绝对路径。

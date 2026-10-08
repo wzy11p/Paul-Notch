@@ -16,7 +16,7 @@ final class CodexStatusStore: ObservableObject {
     @Published private(set) var tasksUpdatedAt: Date?
     private var isRefreshingQuota = false
 
-    private static let cacheKey = "paul-notch-codex-status-cache-v1"
+    private static let cacheKey = "islandmemo-codex-status-cache-v1"
     private let client: IslandCodexAppServerClient
     private let runtimeIndex: IslandCodexTaskRuntimeIndex
     private let rolloutActivityIndex: IslandCodexRolloutActivityIndex

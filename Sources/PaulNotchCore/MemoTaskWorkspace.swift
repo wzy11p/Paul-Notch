@@ -245,8 +245,11 @@ struct MemoTaskDraft: Codable, Equatable {
     // Optional preserves decoding of retained v2 drafts written before subtask editing.
     var subtasks: [SubtaskItem]?
     var pendingStepTitle: String?
+    // An optional planning intent belongs to this retained editor draft, not
+    // to TaskItem's due date. It survives leaving Home before the first save.
+    var plannedDay: String?
 
-    init(task: TaskItem?, categoryID: String?) {
+    init(task: TaskItem?, categoryID: String?, plannedDay: String? = nil) {
         id = task?.id ?? UUID()
         title = task?.title ?? ""
         notes = task?.notes ?? ""
@@ -254,6 +257,7 @@ struct MemoTaskDraft: Codable, Equatable {
         priority = task?.priority ?? .blue
         self.categoryID = task?.categoryID ?? categoryID
         subtasks = task?.subtasks ?? []
+        self.plannedDay = plannedDay
     }
 }
 
@@ -262,28 +266,35 @@ struct MemoTaskEditor: View {
     @ObservedObject var settings: AppSettingsStore
     let task: TaskItem?
     let onClose: () -> Void
+    let onSaved: ((UUID, String?) async -> Bool)?
     let returnLabel: String
     private let draftKey: String
     @State private var draft: MemoTaskDraft
     @State private var saving = false
     @State private var failed = false
+    @State private var failedPlanning = false
     @State private var showsCategory = false
     @State private var showsPriority = false
     @FocusState private var titleFocused: Bool
 
-    init(store: TaskStore, settings: AppSettingsStore, task: TaskItem?, defaultCategory: String?, returnLabel: String = "返回列表", onClose: @escaping () -> Void) {
+    init(store: TaskStore, settings: AppSettingsStore, task: TaskItem?, defaultCategory: String?, plannedDay: String? = nil, returnLabel: String = "返回列表", onSaved: ((UUID, String?) async -> Bool)? = nil, onClose: @escaping () -> Void) {
         self.store = store
         self.settings = settings
         self.task = task
         self.onClose = onClose
+        self.onSaved = onSaved
         self.returnLabel = returnLabel
         draftKey = "memo-task-draft-v2-" + (task?.id.uuidString ?? "new")
         let restored = AppEnvironment.defaults.data(forKey: draftKey)
             .flatMap { try? JSONDecoder().decode(MemoTaskDraft.self, from: $0) }
         // Opening an old nil-category task must not assign today's first tab.
         let newCategory = task == nil ? (defaultCategory ?? settings.memoCategories.first?.id) : nil
-        var initial = restored ?? MemoTaskDraft(task: task, categoryID: newCategory)
+        var initial = restored ?? MemoTaskDraft(task: task, categoryID: newCategory, plannedDay: plannedDay)
         if initial.subtasks == nil { initial.subtasks = task?.subtasks ?? [] }
+        // The current entry action owns placement. A retained draft from an
+        // earlier planning session must not silently schedule a Home-created
+        // task on its old day (or override a newly selected day).
+        if task == nil { initial.plannedDay = plannedDay }
         _draft = State(initialValue: initial)
     }
 
@@ -298,7 +309,8 @@ struct MemoTaskEditor: View {
                 Spacer()
                 Text(task == nil ? "新建任务" : "任务详情").font(.headline)
                 Spacer()
-                Text("移开鼠标不会关闭").font(.caption).foregroundStyle(.secondary)
+                Text(draft.plannedDay.map { "计划日期 \($0)" } ?? "移开鼠标不会关闭")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
@@ -417,7 +429,8 @@ struct MemoTaskEditor: View {
                 .padding(4)
             }
             HStack {
-                Text(failed ? "保存失败，草稿已保留，请重试" : "返回保留草稿 · 点击保存才更新任务")
+                Text(failedPlanning ? "任务已保存，安排日期未保存；草稿已保留，重试不会重复建任务" :
+                     (failed ? "保存失败，草稿已保留，请重试" : "返回保留草稿 · 点击保存才更新任务"))
                     .font(.caption).foregroundStyle(failed ? Color.orange : Color.secondary)
                 Spacer()
                 if let task {
@@ -431,7 +444,8 @@ struct MemoTaskEditor: View {
                     .buttonStyle(.plain)
                 }
                 Button(action: save) {
-                    Text(saving ? "正在保存…" : (failed ? "重试保存" : (task == nil ? "添加任务" : "保存修改")))
+                    Text(saving ? "正在保存…" : (failedPlanning ? "重试保存安排" :
+                        (failed ? "重试保存" : (task == nil ? "添加任务" : "保存修改"))))
                         .padding(.horizontal, 16).frame(minHeight: 44).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -447,7 +461,10 @@ struct MemoTaskEditor: View {
                 DispatchQueue.main.async { titleFocused = true }
             }
         }
-        .onChange(of: draft) { _ in retainDraft(); failed = false }
+        .onChange(of: draft) { _ in
+            retainDraft()
+            if !failedPlanning { failed = false }
+        }
     }
 
     private var categoryName: String {
@@ -518,16 +535,28 @@ struct MemoTaskEditor: View {
         guard !saving else { return }
         appendStep()
         retainDraft()
+        let submitted = draft
         saving = true
         Task { @MainActor in
-            let success = await store.saveDetails(id: draft.id, title: draft.title, notes: draft.notes,
-                dueDate: draft.dueDate, priority: draft.priority, categoryID: draft.categoryID,
-                subtasks: draft.subtasks)
-            saving = false
+            let success = await store.saveDetails(id: submitted.id, title: submitted.title, notes: submitted.notes,
+                dueDate: submitted.dueDate, priority: submitted.priority, categoryID: submitted.categoryID,
+                subtasks: submitted.subtasks)
             if success {
-                AppEnvironment.defaults.removeObject(forKey: draftKey)
-                onClose()
-            } else { failed = true }
+                let planned = await onSaved?(submitted.id, submitted.plannedDay) ?? true
+                saving = false
+                if planned {
+                    failedPlanning = false
+                    AppEnvironment.defaults.removeObject(forKey: draftKey)
+                    onClose()
+                } else {
+                    failedPlanning = true
+                    failed = true
+                    retainDraft()
+                }
+            } else {
+                saving = false
+                failed = true
+            }
         }
     }
 }

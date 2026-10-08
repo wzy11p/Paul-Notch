@@ -24,6 +24,8 @@ cp "$root_dir/.build/release/PaulNotch" "$app_dir/Contents/MacOS/PaulNotch"
 cp "$root_dir/Resources/Info.plist" "$app_dir/Contents/Info.plist"
 cp "$root_dir/Resources/PkgInfo" "$app_dir/Contents/PkgInfo"
 cp "$root_dir/Resources/PaulNotch.icns" "$app_dir/Contents/Resources/PaulNotch.icns"
+ditto "$root_dir/Resources/ProviderLogos" "$app_dir/Contents/Resources/ProviderLogos"
+cp "$root_dir/LICENSE" "$root_dir/THIRD_PARTY_NOTICES.md" "$app_dir/Contents/Resources/"
 
 if [[ "$mode" == "--adhoc" ]]; then
   /usr/bin/codesign --force --deep --sign - "$app_dir"

@@ -6,11 +6,15 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [
         .executable(name: "PaulNotch", targets: ["PaulNotchApp"]),
+        .executable(name: "PaulCredentialAgent", targets: ["PaulCredentialAgent"]),
+        .executable(name: "PaulCredentialAgentV2", targets: ["PaulCredentialAgentV2"]),
     ],
     dependencies: [
         .package(url: "https://github.com/6tail/lunar-swift.git", exact: "1.1.8"),
     ],
     targets: [
+        .executableTarget(name: "PaulCredentialAgent", path: "Sources/PaulCredentialAgent"),
+        .executableTarget(name: "PaulCredentialAgentV2", path: "Sources/PaulCredentialAgentV2"),
         .target(
             name: "PaulNotchCore",
             dependencies: [

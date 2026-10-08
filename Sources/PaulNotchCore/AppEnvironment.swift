@@ -220,10 +220,25 @@ enum AppEnvironment {
     static var isPreview: Bool { current.isPreview }
     static var isPersonal: Bool { current.isPersonal }
     static var usesIsolatedWorkspace: Bool { current.usesIsolatedWorkspace }
+    /// Dedicated quota connections are opt-in in an ordinary public runtime as
+    /// well as the maintainer profile. This does not enable legacy integrations
+    /// or weaken the independent credential-helper identity checks.
+    static var ownedQuotaConnectionsEnabled: Bool { !isPreview }
+    /// The Home refresh button must honor the same explicit opt-in as app startup.
+    static var codexStatusReadsEnabled: Bool {
+        !usesIsolatedWorkspace || ProcessInfo.processInfo.arguments.contains("--preview-live-codex")
+            || Bundle.main.object(forInfoDictionaryKey: "PaulPreviewLiveCodex") as? Bool == true
+    }
     // Foundation documents UserDefaults as thread-safe. The selected instance is immutable.
     nonisolated(unsafe) static let defaults: UserDefaults = {
         guard let suite = current.preferencesSuite else { return .standard }
         guard let defaults = UserDefaults(suiteName: suite) else { fatalError("Cannot open workspace preferences") }
         return defaults
     }()
+    /// Independent, crash-safe WebKit profiles require macOS 14+. Isolated
+    /// previews and older systems must never silently share the default store.
+    static var ownedWebsiteDefaults: UserDefaults? {
+        guard ownedQuotaConnectionsEnabled, #available(macOS 14, *) else { return nil }
+        return defaults
+    }
 }

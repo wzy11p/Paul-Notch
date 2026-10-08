@@ -290,6 +290,7 @@ struct HomeView: View {
     @ObservedObject var links: LinksStore
     @ObservedObject var credentials: CredentialsStore
     @ObservedObject var pomodoro: PomodoroStore
+    @ObservedObject var timePlan: TimePlanStore
     @ObservedObject var music: MusicService
     @ObservedObject var windows: WindowListService
     @ObservedObject var commands: CommandsStore
@@ -346,7 +347,8 @@ struct HomeView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else {
-                TaskFirstHomeView(tasks: tasks, settings: settings, music: music, pomodoro: pomodoro) {
+                TaskFirstHomeView(tasks: tasks, settings: settings, music: music, pomodoro: pomodoro,
+                                  timePlan: timePlan) {
                     openedHomeModule = $0
                 }
             }
@@ -1283,9 +1285,12 @@ struct HomeView: View {
                     .padding(.vertical, 7)
                     .background(IslandTheme.surface2, in: RoundedRectangle(cornerRadius: IslandTheme.radiusInput))
                     .onSubmit {
-                        commands.add(text: newCommand)
-                        newCommand = ""
+                        if commands.add(text: newCommand) { newCommand = "" }
                     }
+            }
+            if let error = commands.errorMessage {
+                Text(error).font(.caption).foregroundStyle(IslandTheme.accentOrange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if !commands.commands.isEmpty {
                 ScrollView {

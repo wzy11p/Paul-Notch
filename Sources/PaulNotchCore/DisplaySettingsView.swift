@@ -688,10 +688,10 @@ struct DisplaySettingsView: View {
     }
 
     private var linksEditor: some View {
-        scrollEditor("链接", detail: "控制链接列表的信息密度") {
+        scrollEditor("链接", detail: "控制链接列表的信息密度和自动处理") {
             settingsCard {
                 settingsToggle("显示完整网址", detail: "在标题下方显示网址", value: $settings.linksShowURL)
-                infoRow("网页元数据", value: "公开 1.0 暂不联网读取")
+                settingsToggle("自动读取标题和图标", detail: "保存后联网补全公开网页信息", value: $settings.linksAutoMetadata)
             }
         }
     }
@@ -733,7 +733,7 @@ struct DisplaySettingsView: View {
                 .padding(.vertical, 11)
                 .settingDivider()
                 infoRow("设置保存", value: settings.homeLayoutPersisted ? "已写入本机" : "仅本次会话")
-                infoRow("数据位置", value: "Application Support/Paul Notch")
+                infoRow("数据位置", value: "Application Support/IslandMemo")
             }
         }
     }
