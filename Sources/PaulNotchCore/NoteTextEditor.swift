@@ -8,6 +8,7 @@ struct NoteTextEditor: NSViewRepresentable {
     let text: String
     let isEditable: Bool
     let focusRequest: Int
+    var accessibilityLabel: String = "随笔正文"
     let onEdit: (UUID, String, Bool) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(draftID: draftID, onEdit: onEdit) }
@@ -47,7 +48,7 @@ struct NoteTextEditor: NSViewRepresentable {
         editor.defaultParagraphStyle = paragraph
         editor.typingAttributes = [.font: NSFont.systemFont(ofSize: 16),
                                   .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph]
-        editor.setAccessibilityLabel("随笔正文")
+        editor.setAccessibilityLabel(accessibilityLabel)
         editor.delegate = context.coordinator
         editor.onBufferChanged = { [weak coordinator = context.coordinator] editor in
             coordinator?.publish(editor)
@@ -61,6 +62,7 @@ struct NoteTextEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let editor = scroll.documentView as? CompositionNoteTextView else { return }
         let coordinator = context.coordinator
+        editor.setAccessibilityLabel(accessibilityLabel)
         coordinator.onEdit = onEdit
         coordinator.synchronize(editor, draftID: draftID, text: text)
         if editor.isEditable != isEditable { editor.isEditable = isEditable }

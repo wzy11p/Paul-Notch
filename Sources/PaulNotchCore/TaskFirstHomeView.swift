@@ -6,9 +6,14 @@ struct TaskFirstHomeView: View {
     @ObservedObject var settings: AppSettingsStore
     @ObservedObject var music: MusicService
     @ObservedObject var pomodoro: PomodoroStore
+    @ObservedObject var timePlan: TimePlanStore
     let onOpenModule: (AppSettingsStore.HomeModule) -> Void
 
     @State private var showsTasks = false
+    @State private var showsPlan = false
+    @State private var selectedPlanDate = Date()
+    @State private var returnToPlanAfterEditor = false
+    @State private var newPlanTaskDayKey: String?
     @State private var composingTask = false
     @State private var initialTaskID: UUID?
     @State private var showsConfiguration = false
@@ -18,19 +23,47 @@ struct TaskFirstHomeView: View {
     @AppStorage("home.compact.focus.v1", store: AppEnvironment.defaults) private var showsFocus = true
     @AppStorage("home.compact.note.v1", store: AppEnvironment.defaults) private var showsNote = true
 
-    private var pending: [TaskItem] { tasks.activeTasks.filter { !$0.isCompleted } }
+    private var pending: [TaskItem] {
+        var items = tasks.activeTasks.filter { !$0.isCompleted }
+        if let index = items.firstIndex(where: { $0.id == timePlan.document.focusTaskID }) {
+            items.insert(items.remove(at: index), at: 0)
+        }
+        return items
+    }
 
     var body: some View {
         Group {
             if composingTask || initialTaskID != nil {
                 MemoTaskEditor(store: tasks, settings: settings, task: tasks.tasks.first { $0.id == initialTaskID },
-                               defaultCategory: nil, returnLabel: "返回首页") {
+                               defaultCategory: nil, plannedDay: newPlanTaskDayKey,
+                               returnLabel: "返回首页", onSaved: { id, dayKey in
+                    if let dayKey {
+                        return await timePlan.planTask(taskID: id, dayKey: dayKey)
+                    }
+                    return true
+                }) {
                     composingTask = false
                     initialTaskID = nil
+                    newPlanTaskDayKey = nil
+                    if returnToPlanAfterEditor { showsPlan = true; returnToPlanAfterEditor = false }
                 }
                 .id(initialTaskID?.uuidString ?? "new")
                 .onAppear { tasks.memoEditingActive = true }
                 .onDisappear { tasks.memoEditingActive = false }
+            } else if showsPlan {
+                TimePlanningWorkspace(tasks: tasks, plan: timePlan, selectedDate: $selectedPlanDate,
+                                      onClose: { showsPlan = false },
+                                      onOpenTask: { id in
+                                          returnToPlanAfterEditor = true
+                                          showsPlan = false
+                                          initialTaskID = id
+                                      },
+                                      onCreateTask: { dayKey in
+                                          newPlanTaskDayKey = dayKey
+                                          returnToPlanAfterEditor = true
+                                          showsPlan = false
+                                          composingTask = true
+                                      })
             } else if showsTasks {
                 VStack(spacing: 4) {
                   if !tasks.memoEditingActive {
@@ -117,6 +150,17 @@ struct TaskFirstHomeView: View {
                 Text("\(pending.count)").font(.callout).foregroundStyle(IslandTheme.text2)
                 Spacer()
                 Button {
+                    selectedPlanDate = Date()
+                    showsPlan = true
+                } label: {
+                    Label("时间规划", systemImage: "calendar.badge.clock")
+                        .font(.system(size: 13, weight: .medium))
+                        .padding(.horizontal, 12).frame(height: 44)
+                        .background(IslandTheme.surface2, in: RoundedRectangle(cornerRadius: 12))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Button {
                     // A local capture action must not emit the global tab-routing
                     // request or compete with another workspace for its intent.
                     composingTask = true
@@ -178,6 +222,10 @@ struct TaskFirstHomeView: View {
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(task.title).font(.system(size: 14, weight: .medium)).lineLimit(2)
+                        if task.id == timePlan.document.focusTaskID {
+                            Text("现在先做").font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(IslandTheme.accentBlue)
+                        }
                         if let due = task.dueDate {
                             Text(due, format: .dateTime.month().day().hour().minute())
                                 .font(.system(size: 11)).foregroundStyle(IslandTheme.text2)

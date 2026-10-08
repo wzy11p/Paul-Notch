@@ -4,7 +4,7 @@ import Security
 /// Minimal Keychain wrapper used for credentials vault and API keys.
 /// Replaces Electron's safeStorage from the reference project.
 enum KeychainHelper {
-    private static let service = "io.github.wzy11p.PaulNotch"
+    private static let service = "com.islandmemo.app"
 
     @discardableResult
     static func save(key: String, value: String) -> Bool {

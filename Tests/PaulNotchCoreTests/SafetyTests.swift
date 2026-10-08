@@ -1,5 +1,7 @@
 import AppKit
+#if SWIFT_PACKAGE
 @testable import PaulNotchCore
+#endif
 #if canImport(XCTest)
 import XCTest
 #else
@@ -17,7 +19,7 @@ func XCTAssertThrowsError<T>(_ value: @autoclosure () throws -> T) {
     do { _ = try value(); preconditionFailure("Expected an error") } catch {}
 }
 
-#if !SWIFT_PACKAGE_TESTS
+#if !SWIFT_PACKAGE
 @main struct SafetyTestRunner {
     static func main() async throws {
         let tests = SafetyTests()
@@ -182,6 +184,7 @@ final class SafetyTests: XCTestCase, @unchecked Sendable {
             let settings = AppSettingsStore()
             XCTAssertFalse(settings.clipboardCaptureText)
             XCTAssertFalse(settings.clipboardCaptureImages)
+            XCTAssertFalse(settings.linksAutoMetadata)
             XCTAssertFalse(settings.credentialsAllowReveal)
             _ = ClipboardStore()
             _ = LinksStore()

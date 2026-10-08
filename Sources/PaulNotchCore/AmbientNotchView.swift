@@ -5,15 +5,23 @@ import SwiftUI
 final class AmbientNotchPresentation: ObservableObject {
     @Published var isFrontmostAppFullScreen = false
     @Published var centerGapWidth: CGFloat = 96
+    @Published private(set) var service: AmbientQuotaService = .codex
+    private var selection = AmbientServiceSelection()
+
+    func observeForeground(bundleIdentifier: String?) {
+        selection.observe(bundleIdentifier: bundleIdentifier)
+        if service != selection.service { service = selection.service }
+    }
 }
 
 /// The always-visible, glanceable state of the top panel.
 ///
-/// It intentionally reuses `CodexStatusStore`: the ambient surface is another
-/// presentation of the same quota/task state, not another Codex client.
+/// Home and the shelf share their connected sources. Foreground changes choose
+/// a presentation, never another quota client or login.
 @MainActor
 struct AmbientNotchView: View {
     @ObservedObject var codexStatus: CodexStatusStore
+    @ObservedObject var connections: QuotaConnectionsStore
     @ObservedObject var presentation: AmbientNotchPresentation
     let onOpen: () -> Void
 
@@ -24,148 +32,137 @@ struct AmbientNotchView: View {
     @State private var releaseTask: Task<Void, Never>?
 
     var body: some View {
-        ZStack {
-            shelfSurface
-
-            GeometryReader { geometry in
-                let inset: CGFloat = presentation.isFrontmostAppFullScreen ? 4 : 5
-                let sideWidth = max(0, (geometry.size.width - inset * 2 - presentation.centerGapWidth) / 2)
-                HStack(spacing: 0) {
-                    quotaStrip.frame(width: sideWidth)
-                    Color.clear
-                        .frame(width: presentation.centerGapWidth)
-                        .accessibilityHidden(true)
-                    activityStatus.frame(width: sideWidth)
-                }
-                .padding(.horizontal, inset)
-                .frame(height: geometry.size.height)
-                .contentShape(Rectangle())
-                .onContinuousHover { phase in
-                    switch phase {
-                    case .active(let location):
-                        guard !reduceMotion, !presentation.isFrontmostAppFullScreen else { return }
-                        companionPointer = PaulCompanionPointer.normalized(location, in: geometry.size)
-                    case .ended:
-                        companionPointer = .zero
+        TimelineView(.periodic(from: .now, by: 5)) { context in
+            let state = quotaPresentation(at: context.date)
+            ZStack {
+                Color.black
+                GeometryReader { geometry in
+                    let inset: CGFloat = presentation.isFrontmostAppFullScreen ? 4 : 5
+                    let sideWidth = max(0, (geometry.size.width - inset * 2 - presentation.centerGapWidth) / 2)
+                    HStack(spacing: 0) {
+                        quotaStrip(state).frame(width: sideWidth)
+                        Color.clear
+                            .frame(width: presentation.centerGapWidth)
+                            .accessibilityHidden(true)
+                        activityStatus(state).frame(width: sideWidth)
+                    }
+                    .padding(.horizontal, inset)
+                    .frame(height: geometry.size.height)
+                    .contentShape(Rectangle())
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            guard !reduceMotion, !presentation.isFrontmostAppFullScreen else { return }
+                            companionPointer = PaulCompanionPointer.normalized(location, in: geometry.size)
+                        case .ended:
+                            companionPointer = .zero
+                        }
                     }
                 }
             }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            acknowledgeClick()
-            onOpen()
-        }
-        .onHover { hovering in
-            if reduceMotion {
-                isHovered = hovering
-            } else {
-                withAnimation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.18)) {
+            .contentShape(Rectangle())
+            .onTapGesture {
+                acknowledgeClick()
+                onOpen()
+            }
+            .onHover { hovering in
+                if reduceMotion {
                     isHovered = hovering
+                } else {
+                    withAnimation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.18)) { isHovered = hovering }
                 }
             }
+            .onDisappear {
+                releaseTask?.cancel()
+                releaseTask = nil
+                companionPressed = false
+                companionPointer = .zero
+                isHovered = false
+            }
+            .help(state.summary)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(state.summary)
+            .accessibilityHint("悬浮仅 Logo 回应，单击打开，再次单击收起")
+            .accessibilityAction(.default, onOpen)
+            .preferredColorScheme(.dark)
         }
-        .onDisappear {
-            releaseTask?.cancel()
-            releaseTask = nil
-            companionPressed = false
-            companionPointer = .zero
-            isHovered = false
-        }
-        .help(hoverSummary)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilitySummary)
-        .accessibilityHint("悬浮仅 Logo 回应，单击打开，再次单击收起")
-        .accessibilityAction(.default, onOpen)
-        .preferredColorScheme(.dark)
-    }
-
-    private var shelfSurface: some View {
-        Color.black
     }
 
     @ViewBuilder
-    private var quotaStrip: some View {
-        if visibleQuotaWindows.isEmpty {
+    private func quotaStrip(_ state: AmbientQuotaPresentation) -> some View {
+        if state.lines.isEmpty {
             HStack(spacing: 5) {
                 Image(systemName: "gauge.with.dots.needle.33percent")
                     .font(.system(size: compactFontSize, weight: .medium))
-                Text("--")
+                Text("—")
                     .font(.system(size: valueFontSize, weight: .semibold, design: .rounded))
                     .monospacedDigit()
             }
             .foregroundStyle(IslandTheme.text3)
         } else {
-            HStack(spacing: 2) {
-                if visibleQuotaWindows.count == 1, let quota = visibleQuotaWindows.first {
-                    quotaValue(quota)
-                } else {
-                    VStack(spacing: 0) {
-                        ForEach(visibleQuotaWindows) { quota in
-                            quotaValue(quota)
-                        }
+            if state.lines.count == 1, let quota = state.lines.first {
+                quotaValue(quota)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(state.lines) { quota in
+                        quotaValue(quota)
                     }
-                }
-
-                if quotaIsStale {
-                    Circle()
-                        .stroke(Color.white.opacity(0.42), lineWidth: 1)
-                        .frame(width: 3, height: 3)
-                        .accessibilityLabel("Showing the last known quota")
                 }
             }
         }
-    }
-
-    private func quotaValue(_ quota: CodexQuotaWindow) -> some View {
-        AmbientQuotaLabel(
-            period: shortLabel(for: quota), remaining: Int(quota.remainingPercent.rounded()),
-            isFullScreen: presentation.isFrontmostAppFullScreen, color: quotaColor(quota.remainingPercent),
-            secondaryColor: IslandTheme.text2
-        )
-        .animation(
-            reduceMotion ? nil : .easeInOut(duration: 0.55),
-            value: Int(quota.remainingPercent.rounded())
-        )
     }
 
     @ViewBuilder
-    private var activityStatus: some View {
-        if !codexStatus.tasksAreFresh {
-            HStack(spacing: 5) {
-                companion
-                Text("?").font(.system(size: valueFontSize, weight: .medium))
+    private func quotaValue(_ quota: AmbientQuotaLine) -> some View {
+        switch quota.value {
+        case .percent(let value):
+            AmbientQuotaLabel(
+                period: quota.period,
+                remaining: value,
+                isFullScreen: presentation.isFrontmostAppFullScreen,
+                color: quotaColor(Double(value)),
+                secondaryColor: IslandTheme.text2
+            )
+        case .percentBound(let lower, _):
+            AmbientQuotaLabel(period: quota.period, remaining: lower,
+                isFullScreen: presentation.isFrontmostAppFullScreen, color: quotaColor(Double(lower)),
+                secondaryColor: IslandTheme.text2, comparison: ">")
+        case .unlimited:
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text(quota.period).font(.system(size: quota.period.count > 2 ? 6 : 7, weight: .medium))
                     .foregroundStyle(IslandTheme.text2)
-            }
-            .accessibilityLabel(codexStatus.taskSyncDescription)
-        } else if activeTaskCount > 0 {
-            HStack(spacing: presentation.isFrontmostAppFullScreen ? 5 : 7) {
-                companion
-                Text(activeTaskCount > 9 ? "9+" : "\(activeTaskCount)")
-                    .font(.system(size: valueFontSize, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
+                Text("不限").font(.system(size: presentation.isFrontmostAppFullScreen ? 9 : 10, weight: .semibold))
                     .foregroundStyle(IslandTheme.text1)
-            }
-            .transition(.asymmetric(
-                insertion: .scale(scale: 0.84).combined(with: .opacity),
-                removal: .opacity
-            ))
-        } else {
-            companion
-            .transition(.opacity)
-            .accessibilityLabel("Codex is idle")
+            }.lineLimit(1).fixedSize()
+        default:
+            Text("—").font(.system(size: valueFontSize)).foregroundStyle(IslandTheme.text2)
         }
     }
 
-    private var companion: some View {
-        PaulCompanionMark(size: logoSize, attentive: isHovered || companionPressed,
-                          pressed: companionPressed,
-                          quiet: reduceMotion || presentation.isFrontmostAppFullScreen,
-                          working: codexStatus.tasksAreFresh && activeTaskCount > 0,
-                          pointer: companionPointer)
-            .frame(width: presentation.isFrontmostAppFullScreen ? 12 : 16,
-                   height: presentation.isFrontmostAppFullScreen ? 12 : 16)
+    private func activityStatus(_ state: AmbientQuotaPresentation) -> some View {
+        HStack(spacing: presentation.isFrontmostAppFullScreen ? 5 : 7) {
+            AmbientProviderMark(service: state.service, size: logoSize, attentive: isHovered,
+                pressed: companionPressed, quiet: reduceMotion || presentation.isFrontmostAppFullScreen,
+                working: state.activity.isWorking, pointer: companionPointer)
+                .frame(width: presentation.isFrontmostAppFullScreen ? 12 : 16,
+                       height: presentation.isFrontmostAppFullScreen ? 12 : 16)
+            if let count = state.activity.displayCount {
+                Text(count)
+                    .font(.system(size: valueFontSize, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(state.activity.isWorking ? IslandTheme.text1 : IslandTheme.text2)
+            }
+        }
     }
+
+    func quotaPresentation(at now: Date) -> AmbientQuotaPresentation {
+        QuotaHomePresentation.ambient(service: presentation.service, snapshot: codexStatus.quota,
+            error: codexStatus.quotaError, readsEnabled: AppEnvironment.codexStatusReadsEnabled,
+            connections: connections, tasksAreFresh: codexStatus.tasksAreFresh,
+            runningTaskCount: codexStatus.workingTasks.count, now: now)
+    }
+
+    var accessibilitySummary: String { quotaPresentation(at: .now).summary }
 
     private func acknowledgeClick() {
         guard !reduceMotion, !presentation.isFrontmostAppFullScreen else { return }
@@ -181,18 +178,6 @@ struct AmbientNotchView: View {
         }
     }
 
-    private var visibleQuotaWindows: [CodexQuotaWindow] {
-        Array(codexStatus.displayQuotaWindows.sorted { lhs, rhs in
-            quotaRank(lhs) < quotaRank(rhs)
-        }.prefix(2))
-    }
-
-    private var activeTaskCount: Int { codexStatus.workingTasks.count }
-
-    private var quotaIsStale: Bool {
-        codexStatus.quota?.freshness == .stale || codexStatus.quotaError != nil
-    }
-
     private var compactFontSize: CGFloat {
         presentation.isFrontmostAppFullScreen ? 8 : 9
     }
@@ -203,22 +188,6 @@ struct AmbientNotchView: View {
 
     private var logoSize: CGFloat {
         presentation.isFrontmostAppFullScreen ? 10 : 13
-    }
-
-    private func shortLabel(for quota: CodexQuotaWindow) -> String {
-        switch quota.windowDurationMinutes {
-        case 300: return "5H"
-        case 10_080: return "7D"
-        default: return "Q"
-        }
-    }
-
-    private func quotaRank(_ quota: CodexQuotaWindow) -> Int {
-        switch quota.windowDurationMinutes {
-        case 10_080: return 0
-        case 300: return 1
-        default: return 2
-        }
     }
 
     private func quotaColor(_ remaining: Double) -> Color {
@@ -233,36 +202,6 @@ struct AmbientNotchView: View {
         )
     }
 
-    private var hoverSummary: String {
-        var parts = visibleQuotaWindows.map { quota in
-            "\(quota.shortName)剩余 \(Int(quota.remainingPercent.rounded()))%\(resetDescription(for: quota))"
-        }
-        parts.append(codexStatus.tasksAreFresh
-            ? (activeTaskCount > 0 ? "\(activeTaskCount) 个 Codex 任务正在运行" : "Codex 空闲")
-            : codexStatus.taskSyncDescription)
-        if quotaIsStale { parts.append("额度是最后一次成功读取的结果") }
-        return parts.joined(separator: "，")
-    }
-
-    private var accessibilitySummary: String {
-        let quotaSummary = visibleQuotaWindows.isEmpty
-            ? "Codex quota is temporarily unavailable"
-            : visibleQuotaWindows.map { quota in
-                "\(quota.shortName) has \(Int(quota.remainingPercent.rounded())) percent remaining"
-            }.joined(separator: ", ")
-        let taskSummary = !codexStatus.tasksAreFresh ? codexStatus.taskSyncDescription : activeTaskCount > 0
-            ? "\(activeTaskCount) Codex tasks are running"
-            : "Codex is idle"
-        let staleSummary = quotaIsStale ? ", showing the last known quota" : ""
-        return "\(quotaSummary), \(taskSummary)\(staleSummary)"
-    }
-
-    private func resetDescription(for quota: CodexQuotaWindow) -> String {
-        guard let reset = quota.resetsAt else { return "" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return "，\(formatter.localizedString(for: reset, relativeTo: .now))重置"
-    }
 }
 
 private struct RunningTaskMark: View {

@@ -92,6 +92,10 @@ enum LinkSafety {
 final class LinksStore: ObservableObject {
     @Published private(set) var groups: [LinkGroup] = []
     @Published var errorMessage: String?
+    private var loadFailure: String?
+    private var pendingWrite: Task<Bool, Never>?
+    private var writeGeneration = 0
+    private let writer: LinkFileWriter
 
     private let fileURL: URL
 
@@ -99,34 +103,44 @@ final class LinksStore: ObservableObject {
         let base = AppEnvironment.dataDirectory
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         fileURL = base.appendingPathComponent("links.json")
+        writer = LinkFileWriter(fileURL: fileURL)
         load()
     }
 
-    func add(rawURL: String) {
+    @discardableResult
+    func add(rawURL: String) async -> Bool {
+        guard loadFailure == nil else { errorMessage = loadFailure; return false }
         guard let url = LinkSafety.normalizeHttpURL(rawURL) else {
             errorMessage = "链接无效：仅支持公网 http/https 地址"
-            return
+            return false
         }
         let text = url.absoluteString
-        guard !groups.contains(where: { $0.links.contains(where: { $0.url == text }) }) else { return }
+        if groups.contains(where: { $0.links.contains(where: { $0.url == text }) }) { return true }
         let link = SavedLink(url: text, title: hostLabel(of: url))
-        insert(link, category: LinkClassifier.classify(url: text, title: ""))
-        persist()
-    }
-
-    func delete(_ link: SavedLink) {
-        for index in groups.indices {
-            groups[index].links.removeAll { $0.id == link.id }
+        let saved = await commit { groups in
+            guard !groups.contains(where: { $0.links.contains(where: { $0.url == text }) }) else { return }
+            Self.insert(link, category: LinkClassifier.classify(url: text, title: ""), into: &groups)
         }
-        groups.removeAll { $0.links.isEmpty }
-        persist()
+        guard saved else { return false }
+        return true
     }
 
-    func renameGroup(_ group: LinkGroup, name: String) {
+    func delete(_ link: SavedLink) async {
+        _ = await commit { groups in
+            for index in groups.indices {
+                groups[index].links.removeAll { $0.id == link.id }
+            }
+            groups.removeAll { $0.links.isEmpty }
+        }
+    }
+
+    func renameGroup(_ group: LinkGroup, name: String) async {
         let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty, let index = groups.firstIndex(where: { $0.id == group.id }) else { return }
-        groups[index].name = cleaned
-        persist()
+        guard !cleaned.isEmpty else { return }
+        _ = await commit { groups in
+            guard let index = groups.firstIndex(where: { $0.id == group.id }) else { return }
+            groups[index].name = cleaned
+        }
     }
 
     func open(_ link: SavedLink) {
@@ -134,7 +148,7 @@ final class LinksStore: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
-    private func insert(_ link: SavedLink, category: String) {
+    private static func insert(_ link: SavedLink, category: String, into groups: inout [LinkGroup]) {
         if let index = groups.firstIndex(where: { $0.name == category }) {
             groups[index].links.insert(link, at: 0)
         } else {
@@ -146,24 +160,129 @@ final class LinksStore: ObservableObject {
         url.host?.replacingOccurrences(of: #"^www\."#, with: "", options: .regularExpression) ?? url.absoluteString
     }
 
+    // Pure parsing helpers remain available to isolated fixtures. The public
+    // distribution deliberately performs no link-metadata network requests.
+    static func extractPageTitle(html: String) -> String? {
+        if let og = metaContent(html: html, key: "og:title"), !og.isEmpty { return cleanTitle(og) }
+        guard let regex = try? NSRegularExpression(pattern: #"<title\b[^>]*>([\s\S]*?)</title>"#, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+              let range = Range(match.range(at: 1), in: html) else { return nil }
+        let title = cleanTitle(String(html[range]))
+        return title.isEmpty ? nil : title
+    }
+
+    private static func metaContent(html: String, key: String) -> String? {
+        guard let tagRegex = try? NSRegularExpression(pattern: #"<meta\b[^>]*>"#, options: [.caseInsensitive]) else { return nil }
+        let fullRange = NSRange(html.startIndex..., in: html)
+        for match in tagRegex.matches(in: html, range: fullRange) {
+            guard let tagRange = Range(match.range, in: html) else { continue }
+            let tag = String(html[tagRange])
+            guard let propRegex = try? NSRegularExpression(pattern: #"(?:property|name)\s*=\s*["']([^"']+)["']"#, options: [.caseInsensitive]),
+                  let propMatch = propRegex.firstMatch(in: tag, range: NSRange(tag.startIndex..., in: tag)),
+                  let propRange = Range(propMatch.range(at: 1), in: tag),
+                  tag[propRange].lowercased() == key.lowercased(),
+                  let contentRegex = try? NSRegularExpression(pattern: #"content\s*=\s*["']([^"']*)["']"#, options: [.caseInsensitive]),
+                  let contentMatch = contentRegex.firstMatch(in: tag, range: NSRange(tag.startIndex..., in: tag)),
+                  let contentRange = Range(contentMatch.range(at: 1), in: tag) else { continue }
+            return String(tag[contentRange])
+        }
+        return nil
+    }
+
+    static func extractFaviconHref(html: String, pageURL: URL) -> URL? {
+        guard let tagRegex = try? NSRegularExpression(pattern: #"<link\b[^>]*>"#, options: [.caseInsensitive]) else { return nil }
+        let fullRange = NSRange(html.startIndex..., in: html)
+        for match in tagRegex.matches(in: html, range: fullRange) {
+            guard let tagRange = Range(match.range, in: html) else { continue }
+            let tag = String(html[tagRange])
+            guard let relRegex = try? NSRegularExpression(pattern: #"rel\s*=\s*["']([^"']+)["']"#, options: [.caseInsensitive]),
+                  let relMatch = relRegex.firstMatch(in: tag, range: NSRange(tag.startIndex..., in: tag)),
+                  let relRange = Range(relMatch.range(at: 1), in: tag),
+                  tag[relRange].range(of: #"(?:^|\s)(?:shortcut\s+)?icon(?:\s|$)"#, options: [.regularExpression, .caseInsensitive]) != nil,
+                  let hrefRegex = try? NSRegularExpression(pattern: #"href\s*=\s*["']([^"']+)["']"#, options: [.caseInsensitive]),
+                  let hrefMatch = hrefRegex.firstMatch(in: tag, range: NSRange(tag.startIndex..., in: tag)),
+                  let hrefRange = Range(hrefMatch.range(at: 1), in: tag) else { continue }
+            let href = String(tag[hrefRange]).replacingOccurrences(of: "&amp;", with: "&")
+            if let url = URL(string: href, relativeTo: pageURL)?.absoluteURL,
+               url.scheme == "http" || url.scheme == "https" { return url }
+        }
+        // Fallback: /favicon.ico at the site root.
+        var components = URLComponents(url: pageURL, resolvingAgainstBaseURL: false)
+        components?.path = "/favicon.ico"
+        components?.query = nil
+        components?.fragment = nil
+        return components?.url
+    }
+
+    private static func cleanTitle(_ value: String) -> String {
+        let withoutTags = value.replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
+        let entities = withoutTags
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+        let squashed = entities.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(squashed.prefix(160))
+    }
+
     // MARK: - Persistence
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL) else { return }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        groups = (try? decoder.decode([LinkGroup].self, from: data)) ?? []
+        do {
+            groups = try decoder.decode([LinkGroup].self, from: Data(contentsOf: fileURL))
+        } catch CocoaError.fileReadNoSuchFile {
+            return
+        } catch {
+            loadFailure = "链接读取失败，原文件已保留；请恢复文件后重新打开应用。"
+            errorMessage = loadFailure
+        }
     }
 
-    private func persist() {
-        let snapshot = groups
-        let url = fileURL
-        Task.detached(priority: .utility) {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            guard let data = try? encoder.encode(snapshot) else { return }
-            try? data.write(to: url, options: .atomic)
+    private func commit(_ mutate: @escaping @MainActor (inout [LinkGroup]) -> Void) async -> Bool {
+        guard loadFailure == nil else { errorMessage = loadFailure; return false }
+        let previous = pendingWrite
+        writeGeneration += 1
+        let write = Task { @MainActor in
+            _ = await previous?.value
+            // Apply each intent to the last successful state, not an obsolete snapshot.
+            var candidate = self.groups
+            mutate(&candidate)
+            do {
+                if candidate != self.groups { try await self.writer.save(candidate) }
+                self.groups = candidate
+                self.errorMessage = nil
+                return true
+            } catch {
+                self.errorMessage = "链接未能保存，请检查磁盘空间和访问权限；输入内容已保留，可重试。"
+                return false
+            }
         }
+        pendingWrite = write
+        return await write.value
+    }
+
+    func flushPendingWrites() async -> Bool {
+        while true {
+            let generation = writeGeneration
+            let result = await pendingWrite?.value ?? true
+            if generation == writeGeneration { return result }
+        }
+    }
+}
+
+/// Encoding legacy favicon data can be expensive. Keep it off the UI actor.
+private actor LinkFileWriter {
+    let fileURL: URL
+    init(fileURL: URL) { self.fileURL = fileURL }
+    func save(_ groups: [LinkGroup]) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(groups).write(to: fileURL, options: .atomic)
     }
 }

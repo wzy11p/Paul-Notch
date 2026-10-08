@@ -23,7 +23,7 @@ struct MemoCategory: Identifiable, Codable, Equatable, Sendable {
 }
 
 /// 面板设置：功能开关 + 开机启动 + 转写配置。
-/// 原生设置中心；不在设置页中执行隐式数据迁移。
+/// 对应 TO-DO-Panel 的设置页（数据目录迁移不移植，IslandMemo 已有固定本地目录）。
 @MainActor
 final class AppSettingsStore: ObservableObject {
     static let maximumHomeModuleCount = 6
@@ -336,13 +336,16 @@ final class AppSettingsStore: ObservableObject {
     @Published var linksShowURL: Bool {
         didSet { AppEnvironment.defaults.set(linksShowURL, forKey: "links-show-url") }
     }
+    @Published var linksAutoMetadata: Bool {
+        didSet { AppEnvironment.defaults.set(linksAutoMetadata, forKey: "links-auto-metadata") }
+    }
     @Published var credentialsAllowReveal: Bool {
         didSet { AppEnvironment.defaults.set(credentialsAllowReveal, forKey: "credentials-allow-reveal") }
     }
     @Published private(set) var priorityNames: [TaskPriority: String]
     @Published private(set) var priorityColorHexes: [TaskPriority: String]
     @Published var autoLaunch: Bool {
-        didSet { applyAutoLaunch() }
+        didSet { if oldValue != autoLaunch { applyAutoLaunch() } }
     }
     @Published var settingsError: String?
 
@@ -474,6 +477,7 @@ final class AppSettingsStore: ObservableObject {
         let savedPreviewLines = defaults.integer(forKey: "clipboard-preview-lines")
         clipboardPreviewLines = savedPreviewLines > 0 ? min(max(savedPreviewLines, 1), 8) : 4
         linksShowURL = defaults.object(forKey: "links-show-url") as? Bool ?? true
+        linksAutoMetadata = defaults.object(forKey: "links-auto-metadata") as? Bool ?? false
         credentialsAllowReveal = defaults.object(forKey: "credentials-allow-reveal") as? Bool ?? false
         let savedPriorityNames = defaults.dictionary(forKey: "task-priority-names") as? [String: String] ?? [:]
         priorityNames = Dictionary(uniqueKeysWithValues: TaskPriority.allCases.map { priority in
@@ -484,7 +488,7 @@ final class AppSettingsStore: ObservableObject {
             (priority, savedPriorityColors[priority.rawValue] ?? Self.defaultPriorityColorHex(priority))
         })
         shortcutDisplayText = ShortcutConfiguration.load().displayText
-        autoLaunch = !AppEnvironment.usesIsolatedWorkspace && SMAppService.mainApp.status == .enabled
+        autoLaunch = (!AppEnvironment.usesIsolatedWorkspace || AppEnvironment.isPersonal) && SMAppService.mainApp.status == .enabled
     }
 
     func isEnabled(_ feature: Feature) -> Bool {
@@ -1079,13 +1083,16 @@ final class AppSettingsStore: ObservableObject {
     }
 
     private func applyAutoLaunch() {
-        guard !AppEnvironment.usesIsolatedWorkspace else {
+        guard !AppEnvironment.usesIsolatedWorkspace || AppEnvironment.isPersonal else {
             settingsError = "当前本地工作区不自动修改开机启动设置"
             return
         }
         do {
             if autoLaunch {
                 try SMAppService.mainApp.register()
+                if SMAppService.mainApp.status == .requiresApproval {
+                    settingsError = "请在系统设置 → 通用 → 登录项中允许 Paul Notch，之后登录 Mac 会自动启动。"
+                } else { settingsError = nil }
             } else {
                 try SMAppService.mainApp.unregister()
             }

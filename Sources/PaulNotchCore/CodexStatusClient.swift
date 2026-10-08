@@ -30,6 +30,11 @@ enum IslandCodexExecutableLocator {
     ) -> URL? {
         let home = fileManager.homeDirectoryForCurrentUser
         var candidates = [
+            // New desktop bundles expose a launcher for their nested CodexCLI.app.
+            URL(fileURLWithPath: "/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex"),
+            home.appendingPathComponent("Applications/Codex.app/Contents/Resources/codex-cli/bin/codex"),
+            URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"),
+            home.appendingPathComponent("Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"),
             URL(fileURLWithPath: "/Applications/Codex.app/Contents/Resources/codex"),
             home.appendingPathComponent("Applications/Codex.app/Contents/Resources/codex"),
             URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex"),
