@@ -19,7 +19,7 @@ PAUL_PREVIEW_DIRECTORY="$ambient_output/workspace" "$ambient_output/AmbientEnvir
   2>&1 | tee "$ambient_output/result.log"
 # AppKit can terminate a restricted process with exit 0 during status-item setup.
 # A missing completion marker is blocked, never a passing regression.
-if ! rg -q '^PASS: ambient environment regression complete' "$ambient_output/result.log"; then
+if ! grep -q '^PASS: ambient environment regression complete' "$ambient_output/result.log"; then
   print -u2 -- 'BLOCKED: native assertions did not complete'
   exit 2
 fi

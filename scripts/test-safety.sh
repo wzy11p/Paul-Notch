@@ -8,7 +8,8 @@ if swift -e 'import XCTest' >/dev/null 2>&1; then
 else
     print -r -- "XCTest unavailable in Command Line Tools; running identical test bodies standalone."
     swift build
-    safety_sources=("${(@f)$(rg --files Sources/PaulNotchCore -g '*.swift' | rg -v '/main.swift$')}")
+    safety_sources=(Sources/PaulNotchCore/**/*.swift(N))
+    safety_sources=(${safety_sources:#*/main.swift})
     build_dir="$(swift build --show-bin-path)"
     lunar_objects=("$build_dir"/LunarSwift.build/*.o)
     swiftc -parse-as-library -I "$build_dir/Modules" "${safety_sources[@]}" \

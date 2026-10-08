@@ -15,7 +15,7 @@ swiftc -swift-version 6 -parse-as-library -I "$foreground_bin/Modules" \
 mkdir -p "$foreground_output/workspace"
 PAUL_PREVIEW_DIRECTORY="$foreground_output/workspace" "$foreground_output/ForegroundNativeValidation" \
   2>&1 | tee "$foreground_output/result.log"
-if ! rg -q '^PASS: foreground native shelf switching' "$foreground_output/result.log"; then
+if ! grep -q '^PASS: foreground native shelf switching' "$foreground_output/result.log"; then
   print -u2 -- 'BLOCKED: native foreground assertions did not complete'
   exit 2
 fi

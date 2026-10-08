@@ -14,15 +14,15 @@ swiftc -swift-version 6 -parse-as-library -I "$focus_bin/Modules" \
 PAUL_PREVIEW_DIRECTORY="$focus_output/workspace" "$focus_output/validate" 2>&1 | tee "$focus_output/result.log"
 PAUL_PREVIEW_DIRECTORY="$focus_output/workspace-cross-app" "$focus_output/validate" --cross-app 2>&1 | tee -a "$focus_output/result.log"
 PAUL_PREVIEW_DIRECTORY="$focus_output/workspace-edit-commands" "$focus_output/validate" --edit-commands 2>&1 | tee -a "$focus_output/result.log"
-if ! rg -q '^PASS: one-click embedded login' "$focus_output/result.log"; then
+if ! grep -q '^PASS: one-click embedded login' "$focus_output/result.log"; then
   print -u2 -- 'BLOCKED: native keyboard assertions did not complete'
   exit 2
 fi
-if ! rg -q '^PASS: inactive accessory Muse' "$focus_output/result.log"; then
+if ! grep -q '^PASS: inactive accessory Muse' "$focus_output/result.log"; then
   print -u2 -- 'BLOCKED: cross-application keyboard assertions did not complete'
   exit 2
 fi
-if ! rg -q '^PASS: owned WebKit standard editing shortcut' "$focus_output/result.log"; then
+if ! grep -q '^PASS: owned WebKit standard editing shortcut' "$focus_output/result.log"; then
   print -u2 -- 'BLOCKED: owned WebKit editing shortcut assertions did not complete'
   exit 2
 fi
