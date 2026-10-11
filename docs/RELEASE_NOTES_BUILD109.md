@@ -19,6 +19,7 @@
 - 保留 `PaulNotch` / `PaulNotchCore`、原有 Bundle ID、数据位置、相机并发修复和默认禁止链接元数据联网的边界。
 - 自定义 API 在普通公开构建中使用自己的 Keychain，不依赖维护者的固定签名组件；不放宽个人组件的身份验证。
 - 没有新增第三方依赖；LunarSwift 仍固定为 1.1.8。
+- 构建要求明确为 Swift 6.2+，CI 固定使用 Xcode 26.3；运行目标仍为 macOS 13+。模型监控清理使用 Swift 6.2 的 [isolated deinit](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0371-isolated-synchronous-deinit.md)，不关闭并发检查或开启实验性绕过。
 - 原生验证需要 macOS 交互式会话，CI 使用隔离数据。纯解析、生命周期、存储和原生几何/动效测试分别提供证据。
 
 ## 验证入口

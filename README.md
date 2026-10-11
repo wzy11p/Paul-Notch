@@ -82,7 +82,7 @@ Paul Notch 把分散在不同 AI 产品里的额度、余额和重置时间，�
 
 ## 开发
 
-需要 macOS 13+ 和 Swift 6。
+应用运行目标仍为 macOS 13+；从源码构建需要 **Swift 6.2+**（Xcode 26+ 或对应 Command Line Tools）。CI 使用 Xcode 26.3，不依赖运行镜像默认选中的旧工具链。
 
 ```bash
 git clone https://github.com/wzy11p/Paul-Notch.git
