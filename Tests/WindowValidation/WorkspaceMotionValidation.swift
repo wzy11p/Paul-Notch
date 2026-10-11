@@ -87,6 +87,47 @@ import QuartzCore
         try expect(completed == ["open", "close"] && motion.direction == nil,
                    "a completion may start the next transition without losing its state")
         print("PASS: reentrant completion can safely start the next transition")
+
+        let window = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 92, height: 92),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        let bubble = window.frame
+        let expanded = NSRect(x: bubble.midX - 260, y: bubble.maxY - 336, width: 520, height: 336)
+        completed.removeAll()
+        motion.morph(window, to: bubble, direction: .closing, reduceMotion: false) { completed.append("stale") }
+        motion.morph(window, to: expanded, direction: .opening, reduceMotion: false) { completed.append("expanded") }
+        settle(0.65)
+        try expect(completed == ["expanded"] && window.frame == expanded && motion.direction == nil,
+                   "a stale floating close cannot hide a reopened workspace")
+        motion.morph(window, to: bubble, direction: .closing, reduceMotion: true) { completed.append("circle") }
+        try expect(window.frame == bubble && completed == ["expanded", "circle"] && motion.direction == nil,
+                   "floating reduced motion settles to the exact circle synchronously")
+        print("PASS: floating window reversal and reduced-motion collapse preserve final intent")
+
+        let readingView = NSView(frame: NSRect(origin: .zero, size: expanded.size))
+        readingView.wantsLayer = true
+        readingView.layer?.backgroundColor = NSColor.darkGray.cgColor
+        let container = WorkspacePanelContainer(workspace: readingView)
+        window.contentView = container
+        window.setFrame(expanded, display: false)
+        motion.morph(window, to: bubble, direction: .closing, reduceMotion: false) {}
+        settle(0.05)
+        try expect(container.layer?.sublayers?.first(where: { $0.name == "quota-bubble-shell" })?.shadowOpacity == 0,
+                   "the closing housing targets a shadow-free circle instead of keeping an outer halo")
+        try expect(readingView.bounds.size == expanded.size && container.contentHolder.layer?.opacity == 0,
+                   "compositor collapse freezes the mounted reading view rather than relayout on each frame")
+        motion.morph(window, to: expanded, direction: .opening, reduceMotion: false) {}
+        try expect(container.layer?.sublayers?.first(where: { $0.name == "quota-bubble-shell" })?.shadowOpacity ?? 0 > 0,
+                   "reversing into the reading panel restores its ordinary depth without changing the circle")
+        motion.cancel()
+        try expect(window.frame == expanded && container.contentHolder.layer?.opacity == 1 && container.layer?.sublayers?.count == 1,
+                   "cancel/reversal restores the same view and releases all transition layers")
+        try expect(container.contentHolder.layer?.frame == NSRect(origin: .zero, size: expanded.size),
+                   "restoring the reading layer must not leave its content shifted by half the panel")
+        completed.removeAll()
+        motion.morph(window, to: bubble, direction: .closing, reduceMotion: true) { completed.append("quiet") }
+        try expect(window.frame == bubble && completed == ["quiet"] && container.layer?.sublayers?.count == 1,
+                   "reduced motion creates no snapshot animation and settles immediately")
+        print("PASS: fixed compositor viewport, cancellation cleanup and snapshot-free reduced motion")
     }
 
     struct Failure: Error { let message: String }

@@ -7,7 +7,25 @@ import WebKit
 @MainActor final class WebsiteQuotaBrowser: NSObject, WebsiteQuotaSession, ObservableObject,
     WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     let provider: WebsiteQuotaProvider
-    let webView: WKWebView
+    private var retainedWebView: WKWebView?
+    private let websiteDataStore: WKWebsiteDataStore
+    private var backgroundMode = false
+    private var loadOnAccess: Bool
+    private var visibleDocuments: [ObjectIdentifier: Int] = [:]
+    private var idleReleaseTask: Task<Void, Never>?
+    private var museReader: MuseSubscriptionReader?
+    private var museActionID: String?
+    /// A full official page is created only for a visible source/login or a
+    /// bounded DOM fallback. Its durable profile is independent of this view.
+    var webView: WKWebView {
+        if let retainedWebView { return retainedWebView }
+        let view = makeWebView()
+        retainedWebView = view
+        if active && (loadOnAccess || backgroundMode) {
+            quotaLoader(view, URLRequest(url: provider.quotaURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15))
+        }
+        return view
+    }
     @Published private(set) var loginPopup: WKWebView?
     @Published private(set) var error: String?
     var displayedWebView: WKWebView { loginPopup ?? webView }
@@ -25,17 +43,25 @@ import WebKit
     init(provider: WebsiteQuotaProvider, allowsConnections: Bool, loadImmediately: Bool = true,
          profileIdentifier: UUID? = nil, quotaLoader: ((WKWebView, URLRequest) -> Void)? = nil) {
         self.provider = provider
+        self.loadOnAccess = loadImmediately
         self.quotaLoader = quotaLoader ?? { view, request in _ = view.load(request) }
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
         if #available(macOS 14, *), allowsConnections, let profileIdentifier {
-            configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: profileIdentifier)
-        }
+            websiteDataStore = WKWebsiteDataStore(forIdentifier: profileIdentifier)
+        } else { websiteDataStore = .nonPersistent() }
+        super.init()
+        guard allowsConnections else { active = false; error = "隔离验证不会加载账户页面"; return }
+        // loadImmediately:false remains useful for synthetic documents and
+        // restores. Merely restoring a journal must not load a whole website.
+        if loadImmediately { _ = webView }
+    }
+
+    private func makeWebView() -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = websiteDataStore
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.suppressesIncrementalRendering = false
-        webView = QuotaInteractiveWebView(frame: NSRect(x: 0, y: 0, width: 568, height: 310), configuration: configuration)
-        super.init()
-        webView.navigationDelegate = self; webView.uiDelegate = self
+        let view = QuotaInteractiveWebView(frame: NSRect(x: 0, y: 0, width: 568, height: 310), configuration: configuration)
+        view.navigationDelegate = self; view.uiDelegate = self
         if provider.isAudio {
             configuration.userContentController.add(self, name: Self.channel)
             configuration.userContentController.addUserScript(WKUserScript(source: Self.audioReadScript,
@@ -45,13 +71,74 @@ import WebKit
             configuration.userContentController.addUserScript(WKUserScript(source: Self.museBackgroundLayoutScript,
                 injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
-        guard allowsConnections else { active = false; error = "隔离验证不会加载账户页面"; return }
-        if loadImmediately { self.quotaLoader(webView, URLRequest(url: provider.quotaURL)) }
+        return view
+    }
+
+    func prepareForBackground() { backgroundMode = true; releaseIdleDocument() }
+    func openLoginPage() {
+        loadOnAccess = true
+        if retainedWebView == nil { _ = webView }
+    }
+    func setDocumentVisible(_ view: WKWebView, visible: Bool) {
+        let id = ObjectIdentifier(view)
+        if visible {
+            idleReleaseTask?.cancel(); idleReleaseTask = nil
+            visibleDocuments[id, default: 0] += 1
+        } else {
+            let count = visibleDocuments[id, default: 0] - 1
+            if count > 0 { visibleDocuments[id] = count } else { visibleDocuments[id] = nil }
+            releaseIdleDocument()
+        }
+    }
+    private func releaseIdleDocument() {
+        guard backgroundMode, !reading, visibleDocuments.isEmpty else { return }
+        idleReleaseTask?.cancel()
+        // SwiftUI can dismantle and remount the same official view during the
+        // login -> connected transition. Let that transaction finish first.
+        idleReleaseTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            guard let self, backgroundMode, !reading, visibleDocuments.isEmpty else { return }
+            discardDocument(); idleReleaseTask = nil
+        }
+    }
+    private func discardDocument() {
+        closeLoginPopup()
+        if let view = retainedWebView {
+            view.stopLoading(); view.navigationDelegate = nil; view.uiDelegate = nil
+            view.configuration.userContentController.removeScriptMessageHandler(forName: Self.channel)
+            view.configuration.userContentController.removeAllUserScripts()
+        }
+        retainedWebView = nil
+        credits = [:]; plans = [:]; navigationRevision += 1
     }
 
     func read(reloading: Bool) async throws -> WebsiteQuotaSnapshot {
         guard active, !reading else { throw QuotaConnectionError.unavailable }
+        idleReleaseTask?.cancel(); idleReleaseTask = nil
         reading = true
+        defer { reading = false; releaseIdleDocument() }
+        if provider == .muse, backgroundMode, visibleDocuments.isEmpty {
+            let reader = MuseSubscriptionReader(dataStore: websiteDataStore)
+            museReader = reader
+            defer { reader.stop(); museReader = nil }
+            do {
+                let result = try await reader.read(actionID: museActionID)
+                try Task.checkCancellation()
+                guard active else { throw CancellationError() }
+                let snapshot = try result.snapshot(at: .now)
+                museActionID = result.actionID
+                return snapshot
+            } catch is CancellationError { throw CancellationError() }
+            catch QuotaConnectionError.authentication { throw QuotaConnectionError.authentication }
+            catch {
+                // An undocumented action can change. The existing bounded
+                // official-page reader remains a fallback, released below.
+                try Task.checkCancellation()
+                guard active else { throw CancellationError() }
+            }
+        }
+        let hadDocument = retainedWebView != nil
+        let webView = self.webView
         let layoutToken = provider == .muse ? UUID().uuidString : nil
         let preferences = webView.configuration.preferences
         var restoreScheduling: (() -> Void)?
@@ -64,9 +151,8 @@ import WebKit
         defer {
             if let layoutToken { endMuseLayout(layoutToken) }
             restoreScheduling?()
-            reading = false
         }
-        if reloading {
+        if reloading && (hadDocument || !loadOnAccess && !backgroundMode) {
             credits = [:]; plans = [:]
             // Fixed, known quota route; never a chat page or a login navigation.
             quotaLoader(webView, URLRequest(url: provider.quotaURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15))
@@ -158,7 +244,7 @@ import WebKit
 
     private func endMuseLayout(_ token: String) {
         // The document-side token fences delayed cleanup against a later read.
-        webView.evaluateJavaScript("window.__PaulMuseBackgroundLayout?.end('\(token)')", completionHandler: nil)
+        retainedWebView?.evaluateJavaScript("window.__PaulMuseBackgroundLayout?.end('\(token)')", completionHandler: nil)
         if museLayoutToken == token { museLayoutToken = nil }
     }
 
@@ -187,10 +273,13 @@ import WebKit
     func stop() {
         if let token = museLayoutToken { endMuseLayout(token) }
         active = false; navigationRevision += 1; credits = [:]; plans = [:]
+        idleReleaseTask?.cancel(); idleReleaseTask = nil
+        museReader?.stop(); museReader = nil
         closeLoginPopup()
-        webView.stopLoading(); webView.navigationDelegate = nil; webView.uiDelegate = nil
-        webView.configuration.userContentController.removeScriptMessageHandler(forName: Self.channel)
-        webView.configuration.userContentController.removeAllUserScripts()
+        retainedWebView?.stopLoading(); retainedWebView?.navigationDelegate = nil; retainedWebView?.uiDelegate = nil
+        retainedWebView?.configuration.userContentController.removeScriptMessageHandler(forName: Self.channel)
+        retainedWebView?.configuration.userContentController.removeAllUserScripts()
+        retainedWebView = nil; visibleDocuments.removeAll()
     }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {

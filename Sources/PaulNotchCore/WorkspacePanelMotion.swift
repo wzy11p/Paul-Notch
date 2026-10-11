@@ -14,6 +14,7 @@ final class WorkspacePanelMotion {
     private(set) var direction: Direction?
     private var revision: UInt64 = 0
     private var fallback: Task<Void, Never>?
+    private var bubbleMorph: WorkspaceBubbleMorph?
     private let animation: Animation
 
     init(animation: @escaping Animation = WorkspacePanelMotion.appKitAnimation) {
@@ -55,10 +56,63 @@ final class WorkspacePanelMotion {
     }
 
     func cancel() {
+        invalidateCallbacks()
+        bubbleMorph?.finish()
+        bubbleMorph = nil
+    }
+
+    private func invalidateCallbacks() {
         revision &+= 1
         fallback?.cancel()
         fallback = nil
         direction = nil
+    }
+
+    /// The detached workspace contracts to its saved circle, with the same
+    /// revision guard as the hardware drawer. Retargeting cannot finish an old close.
+    func morph(_ window: NSWindow, to frame: NSRect, direction: Direction, bubbleView: NSView? = nil,
+               reduceMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+               completion: @escaping @MainActor () -> Void) {
+        // Retarget the existing presentation layers, not a new endpoint image.
+        // General cancellation still releases the temporary raster immediately.
+        invalidateCallbacks()
+        self.direction = direction
+        let ticket = revision
+        let duration: TimeInterval = reduceMotion ? 0 : (direction == .opening ? 0.38 : 0.32)
+        if !reduceMotion, bubbleMorph == nil, let container = window.contentView as? WorkspacePanelContainer {
+            let expanded = direction == .opening ? frame : window.frame
+            let bubble = direction == .opening ? window.frame : frame
+            bubbleMorph = WorkspaceBubbleMorph(window: window, container: container,
+                expandedFrame: expanded, bubbleFrame: bubble, bubbleView: bubbleView, opening: direction == .opening)
+        }
+        let finish: @MainActor () -> Void = { [weak self, weak window] in
+            guard let self, let window, self.revision == ticket, self.direction != nil else { return }
+            self.fallback?.cancel(); self.fallback = nil; self.direction = nil
+            self.bubbleMorph?.finish(); self.bubbleMorph = nil
+            window.setFrame(frame, display: false)
+            completion()
+        }
+        if reduceMotion { finish(); return }
+        fallback = Task { @MainActor in
+            do { try await Task.sleep(for: .seconds(duration + 0.25)) } catch { return }
+            finish()
+        }
+        if let bubbleMorph {
+            bubbleMorph.animate(opening: direction == .opening, duration: duration)
+            // Core Animation owns all frames. One bounded task settles the native
+            // endpoint; there is no app-driven per-frame timer or window resize.
+            fallback?.cancel()
+            fallback = Task { @MainActor in
+                do { try await Task.sleep(for: .seconds(duration)) } catch { return }
+                finish()
+            }
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1)
+            window.animator().setFrame(frame, display: true)
+        } completionHandler: { Task { @MainActor in finish() } }
     }
 
     private func finish(_ ticket: UInt64, view: NSView, origin: NSPoint,

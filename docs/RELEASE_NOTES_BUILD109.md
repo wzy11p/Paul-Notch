@@ -1,0 +1,48 @@
+# 1.0.0 / build 109
+
+更新日期：2026-10-11。对比公开 build 91，同步已迭代的 build 92–109 源码；不包含个人账号、证书、备份或安装包。
+
+## 更新重点
+
+1. **轻量化**：网站额度按需读取，Muse 订阅专用轻量查询；保留登录配置而不要求完整聊天页常驻。共享现有调度，限制自定义 API 并发，休眠/隐藏时停止不必要工作。
+2. **首页与连接**：更紧凑的石墨色便当盒、自然顶部过渡、按数量适配默认尺寸；可拖动排序、移除/撤销/加回卡片。隐藏不等于断开。
+3. **悬浮球**：拖离刘海后收为圆球，点击展开、拖回归位、位置恢复；改进收放动画、圆形几何、内部玻璃高光与有界液体惯性。无可靠百分比时不编造水位。
+4. **豆包双额度**：「5 小时」和「7 天总额」在刘海与球内同时可见，各自显示重置。球的液面只映射有效七天百分比，不平均两条数据。
+5. **Cursor 模型跟随**：显式开启后识别桌面端和 Chrome 官方 Agents 网页的选择器；Grok / 其他已识别模型切换对应额度池，Auto / 未知保留双额度。网页 Sonnet 跟随已获本机使用者确认。
+6. **主动重置提醒**：账户与公告分开，标出来源、北京时间和倒计时；支持适用的 24 小时 / 1 小时提醒、发现明确公告时提醒、确认与稍后提醒。查询公告不消耗模型 Token。
+7. **自助 API**：OpenRouter 钱包预设、受限 HTTPS GET 自定义额度、真实字段映射和预览、独立 Keychain 存储。验证成功并保存后才加入账户，不接受手填余额冒充连接。
+8. **恢复与错误处理**：Codex 本机可执行路径恢复；API 换 Key 先验证再替换，失败保留旧连接；锁定或拒绝时暂停后台读取，不重复自动弹密码。
+9. **额度信息准确性**：发布审查修正 Muse 额外余额的到期表述，接口未提供期限时明确显示未知，不从余额存在推导「从不过期」。
+
+## 公开版兼容
+
+- 保留 `PaulNotch` / `PaulNotchCore`、原有 Bundle ID、数据位置、相机并发修复和默认禁止链接元数据联网的边界。
+- 自定义 API 在普通公开构建中使用自己的 Keychain，不依赖维护者的固定签名组件；不放宽个人组件的身份验证。
+- 没有新增第三方依赖；LunarSwift 仍固定为 1.1.8。
+- 构建要求明确为 Swift 6.2+，CI 固定使用 Xcode 26.3；运行目标仍为 macOS 13+。模型监控清理使用 Swift 6.2 的 [isolated deinit](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0371-isolated-synchronous-deinit.md)，不关闭并发检查或开启实验性绕过。
+- 原生验证需要 macOS 交互式会话，CI 使用隔离数据。纯解析、生命周期、存储和原生几何/动效测试分别提供证据。
+
+## 验证入口
+
+```sh
+swift build
+swift build -c release
+swift test
+zsh scripts/test-public-runtime.sh
+zsh scripts/test-public-boundaries.sh
+zsh scripts/test-public-custom-quota.sh
+zsh scripts/test-adversarial.sh
+zsh scripts/test-quota-reset-reminders.sh
+zsh scripts/test-quota-home.sh
+```
+
+仅有 Command Line Tools 的环境可能不执行 XCTest，不能把测试 target 编译成功算作测试案例通过。独立脚本覆盖新旧额度源、凭证隔离、错误恢复、选中模型、双额度、卡片可见性、悬浮几何与原生动画生命周期；UI 焦点与权限验证仍受交互会话限制。
+
+## 仍然明确的限制
+
+- 这是源码更新，不是 Developer ID 公证的通用安装包；临时/变化的自签身份可能需要重新授权。
+- 官方过期或撤销登录仍需重新连接；没有承诺永久登录或在所有机器上实测重启。
+- MiniMax Audio 适配器存在，但真实账户持续同步未完成验收；它不等于 MiniMax API 钱包。独立 SuperGrok 不冒充 Cursor 计费的 Grok Bot。
+- Chrome 模型识别不等于已验证其他浏览器，不证明后台真实运行模型或登录账户相同。
+- AIHOT 有采集与查询延迟，不保证瞬时通知；无明确时间和可靠来源的信息不作确定性提醒。
+- 不提供统一固定的 RAM / 帧率保证；按来源生命周期降低负担，不能以安装体积替代运行内存。

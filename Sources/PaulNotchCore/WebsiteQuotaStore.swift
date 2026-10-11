@@ -3,8 +3,10 @@ import Combine
 
 @MainActor protocol WebsiteQuotaSession: AnyObject {
     func read(reloading: Bool) async throws -> WebsiteQuotaSnapshot
+    func prepareForBackground()
     func stop()
 }
+extension WebsiteQuotaSession { func prepareForBackground() {} }
 
 /// One owned session per membership. Only nonsecret, versioned profile IDs are
 /// stored here; WebKit owns the login data in its private application profiles.
@@ -82,6 +84,7 @@ import Combine
         } else { candidate = factory(selected) }
         candidateProvider = selected
         candidateBrowser = candidate as? WebsiteQuotaBrowser
+        candidateBrowser?.openLoginPage()
         loginDeadline = loginState.pending == nil ? clock().addingTimeInterval(600) : nil
         loginError = nil; isPresentingLogin = true
     }
@@ -122,6 +125,7 @@ import Combine
                 isPresentingLogin = false; needsLogin = false; error = nil; failures = 0
                 loginError = nil
                 nextAttempt = clock().addingTimeInterval(30)
+                session?.prepareForBackground()
                 cleanupProfiles()
             } catch {
                 guard !Task.isCancelled, capturedRevision == revision else { return }
@@ -161,6 +165,7 @@ import Combine
             if candidate == nil {
                 candidateID = pending.identifier; candidateProvider = pending.provider
                 candidate = persistentFactory?(pending.provider, pending.identifier)
+                candidate?.prepareForBackground()
             }
             if let candidate { readCandidate(candidate, provider: pending.provider) }
             return
@@ -170,7 +175,10 @@ import Combine
         // Cold start (or stop/start) restores the verified owned profile lazily,
         // without opening the setup UI or treating yesterday's value as current.
         let restoring = session == nil
-        if restoring, let profileID { session = persistentFactory?(provider, profileID) }
+        if restoring, let profileID {
+            session = persistentFactory?(provider, profileID)
+            session?.prepareForBackground()
+        }
         guard let session else { return }
         let capturedRevision = revision
         isRefreshing = true

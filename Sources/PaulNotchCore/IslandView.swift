@@ -122,6 +122,7 @@ struct IslandView: View {
     var onGeometryBegin: () -> Void = {}
     var onGeometryCommit: (NSRect, NSScreen) -> Void = { _, _ in }
     var onGeometryReset: () -> Void = {}
+    var onGeometryMoveCommit: ((NSRect, NSScreen) -> Void)? = nil
     @State private var title = ""
     @State private var hasDueDate = false
     @State private var dueDate = Date().addingTimeInterval(3600)
@@ -141,10 +142,18 @@ struct IslandView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            RoundedRectangle(cornerRadius: IslandTheme.radiusPanel, style: .continuous)
-                .fill(IslandTheme.background)
+            if navigation.isQuotaHome {
+                QuotaPanelBackdrop()
+                if !panelMetrics.isFloating {
+                    QuotaDockedTopBlend(topInset: panelMetrics.topInset)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                }
+            } else {
+                RoundedRectangle(cornerRadius: IslandTheme.radiusPanel, style: .continuous)
+                    .fill(IslandTheme.background)
+            }
             // 四角使用同一条连续曲线，让展开态仍像一个完整的 macOS 浮层。
-            RoundedRectangle(cornerRadius: IslandTheme.radiusPanel, style: .continuous)
+            RoundedRectangle(cornerRadius: navigation.isQuotaHome ? 22 : IslandTheme.radiusPanel, style: .continuous)
                 .stroke(IslandTheme.hairline, lineWidth: 1)
 
             VStack(spacing: IslandTheme.s3) {
@@ -205,19 +214,23 @@ struct IslandView: View {
                     }
                 }
             }
-            .padding(.horizontal, navigation.isQuotaHome ? IslandTheme.s3 : IslandTheme.s6)
-            .padding(.top, panelMetrics.topInset + 20)
-            .padding(.bottom, navigation.isQuotaHome ? 16 : IslandTheme.s4)
+            .padding(.horizontal, navigation.isQuotaHome ? 0 : IslandTheme.s6)
+            .padding(.top, panelMetrics.topInset + (navigation.isQuotaHome ? 16 : 20))
+            .padding(.bottom, navigation.isQuotaHome ? 0 : IslandTheme.s4)
             .frame(maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .top) {
-            WorkspaceWindowGrip(kind: .move, onBegin: onGeometryBegin,
-                                onCommit: onGeometryCommit, onReset: onGeometryReset)
-                .frame(width: 112, height: 18).padding(.top, panelMetrics.topInset)
+            WorkspaceWindowGrip(kind: .move,
+                                minimumSize: navigation.layoutKey == "quota" ? QuotaHomeLayout.minimumSize : NSSize(width: 480, height: 320),
+                                onBegin: onGeometryBegin,
+                                onCommit: onGeometryMoveCommit ?? onGeometryCommit, onReset: onGeometryReset)
+                .frame(width: 112, height: 16).padding(.top, panelMetrics.topInset)
         }
         .overlay(alignment: .bottomTrailing) {
-            WorkspaceWindowGrip(kind: .resize, onBegin: onGeometryBegin,
+            WorkspaceWindowGrip(kind: .resize,
+                                minimumSize: navigation.layoutKey == "quota" ? QuotaHomeLayout.minimumSize : NSSize(width: 480, height: 320),
+                                onBegin: onGeometryBegin,
                                 onCommit: onGeometryCommit, onReset: onGeometryReset)
                 .frame(width: 28, height: 28).padding(4)
         }

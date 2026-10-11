@@ -16,6 +16,9 @@ struct QuotaOverviewView: View {
     var onConnectService: ((String) -> Void)? = nil
     var savedOrder: [String] = []
     var onReorder: (([String]) -> Void)? = nil
+    var onRemove: ((String) -> Void)? = nil
+    var onRestore: ((String) -> Void)? = nil
+    var onLayoutChange: (QuotaHomeLayout) -> Void = { _ in }
     var isActive = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var focusedControl: FocusTarget?
@@ -27,6 +30,8 @@ struct QuotaOverviewView: View {
     @State private var pinnedID: String?
     @State private var showsNoticeExplanation = false
     @State private var showsSearch = false
+    @State private var isEditingCards = false
+    @State private var lastRemoved: (id: String, name: String)?
 
     private var results: [QuotaOverviewAccount] {
         let order = QuotaCardOrder.resolved(saved: onReorder == nil ? sessionOrder : savedOrder,
@@ -36,9 +41,18 @@ struct QuotaOverviewView: View {
     }
     private var selected: QuotaOverviewAccount? { accounts.first { $0.id == selectedID } }
     private var pinned: QuotaOverviewAccount? { accounts.first { $0.id == pinnedID } }
+    private var layoutRequest: QuotaHomeLayout {
+        QuotaHomeLayout(accountCount: results.count,
+            supplementaryHeight: (showsSearch ? 46 : 0) + (lastRemoved != nil ? 26 : isEditingCards ? 16 : 0),
+            minimumBodyHeight: selected != nil || showsNoticeExplanation ? 360 : 0)
+    }
+    private var removalAction: ((String) -> Void)? {
+        guard onRemove != nil else { return nil }
+        return { id in removeAccount(id) }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 8) {
             header
             if mode == .preview {
                 Text("交互预览 · 示例数值，尚未连接真实账户")
@@ -50,10 +64,24 @@ struct QuotaOverviewView: View {
                     if showsSearch { controls }
                     overview
                 }
-                .opacity(selected == nil ? 1 : 0)
-                .allowsHitTesting(selected == nil)
-                .accessibilityHidden(selected != nil)
-                if let selected {
+                .opacity(selected == nil && !showsNoticeExplanation ? 1 : 0)
+                .allowsHitTesting(selected == nil && !showsNoticeExplanation)
+                .accessibilityHidden(selected != nil || showsNoticeExplanation)
+                if showsNoticeExplanation {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Button { showsNoticeExplanation = false } label: {
+                        QuotaBackButtonLabel()
+                        }
+                        .buttonStyle(QuotaOverviewButtonStyle())
+                        .accessibilityIdentifier("quota-notice-back")
+                        if let noticeContent { noticeContent }
+                        else {
+                            Text("公告接入后会在这里显示来源、时间与确认状态，不会改写个人额度。")
+                                .font(.system(size: 12)).foregroundStyle(QuotaOverviewPalette.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                } else if let selected {
                     details(selected)
                         .transition(QuotaInteractionMotion.entrance)
                         .onAppear { focusedControl = .back }
@@ -63,13 +91,15 @@ struct QuotaOverviewView: View {
             .animation(QuotaInteractionMotion.content(reduceMotion: reduceMotion), value: selectedID)
             footer
         }
-        .padding(20)
+        .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .foregroundStyle(QuotaOverviewPalette.primary)
-        .background(Color.black)
+        .background(Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .preferredColorScheme(.dark)
         .disabled(!isActive)
+        .onAppear { onLayoutChange(layoutRequest) }
+        .onChange(of: layoutRequest) { onLayoutChange($0) }
         .background {
             Button("搜索账户") { showsSearch = true; focusedControl = .search }
                 .keyboardShortcut("f", modifiers: .command)
@@ -88,17 +118,19 @@ struct QuotaOverviewView: View {
             else if selectedID != nil { selectedID = nil }
             else if !search.isEmpty { search = ""; focusedControl = .search }
             else if showsSearch { showsSearch = false; filter = .all; focusedControl = nil }
+            else if isEditingCards { isEditingCards = false }
             else { onClose() }
         }
-        .onChange(of: isActive) { if !$0 { focusedControl = nil } }
+        .onChange(of: isActive) { if !$0 { focusedControl = nil; isEditingCards = false } }
         .onChange(of: accounts.map(\.id)) { ids in
             if let selectedID, !ids.contains(selectedID) { self.selectedID = nil }
             if let pinnedID, !ids.contains(pinnedID) { self.pinnedID = nil }
+            if let lastRemoved, ids.contains(lastRemoved.id) { self.lastRemoved = nil }
         }
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Image(nsImage: PaulBrand.menuBarImage()).resizable().frame(width: 18, height: 18)
                 .accessibilityHidden(true)
             Text("我的 AI").font(.system(size: 17, weight: .semibold))
@@ -107,12 +139,23 @@ struct QuotaOverviewView: View {
                 Button(action: onAddService) {
                     Label("连接", systemImage: "plus")
                         .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 10).frame(height: 32)
+                        .padding(.horizontal, 10).frame(height: 30)
                 }
                 .buttonStyle(QuotaOverviewButtonStyle())
-                .background(QuotaOverviewPalette.surface, in: Capsule())
                 .accessibilityIdentifier("quota-add-service")
                 .help("添加服务或管理已有连接")
+            }
+            if onRemove != nil {
+                Button {
+                    selectedID = nil; showsNoticeExplanation = false; focusedControl = nil
+                    isEditingCards.toggle()
+                } label: {
+                    Text(isEditingCards ? "完成" : "编辑").font(.system(size: 12, weight: .medium))
+                        .padding(.horizontal, 10).frame(height: 30)
+                }
+                .buttonStyle(QuotaOverviewButtonStyle(isSelected: isEditingCards))
+                .help("点减号从首页移除卡片，不会断开连接")
+                .accessibilityIdentifier("quota-edit-cards")
             }
             Menu {
                 Button("搜索与筛选") { showsSearch = true; focusedControl = .search }
@@ -129,15 +172,20 @@ struct QuotaOverviewView: View {
                         }
                     }
                 }
-            } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
-            .menuStyle(.borderlessButton).fixedSize()
+            } label: {
+                Image(systemName: "ellipsis").font(.system(size: 14, weight: .medium))
+                    .frame(width: 30, height: 30)
+            }
+            .menuStyle(.button).menuIndicator(.hidden)
+            .buttonStyle(QuotaOverviewButtonStyle()).fixedSize()
             .accessibilityLabel("更多功能、搜索与刷新")
             Button(action: onClose) {
-                Image(systemName: mode == .notch ? "chevron.up" : "xmark").frame(width: 32, height: 32)
+                Image(systemName: mode == .notch ? "chevron.up" : "xmark")
+                    .font(.system(size: 12, weight: .medium)).frame(width: 30, height: 30)
             }
             .buttonStyle(QuotaOverviewButtonStyle())
-            .help(mode == .notch ? "收起面板，保留刘海额度" : "关闭交互预览，不影响正式版")
-            .accessibilityLabel(mode == .notch ? "收起刘海" : "关闭预览")
+            .help(mode == .notch ? "收起面板，保留当前额度" : "关闭交互预览，不影响正式版")
+            .accessibilityLabel(mode == .notch ? "收起面板" : "关闭预览")
         }
     }
 
@@ -176,7 +224,7 @@ struct QuotaOverviewView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(accounts.isEmpty ? "还没有账户" : "没有找到匹配的账户")
                         .font(.system(size: 16, weight: .semibold))
-                    Text(accounts.isEmpty ? "接入后的账户会显示在这里。" : "换个名称试试，或把类型切回全部。")
+                    Text(accounts.isEmpty ? "点「连接」添加服务，或加回已移除的卡片。" : "换个名称试试，或把类型切回全部。")
                         .font(.system(size: 13)).foregroundStyle(QuotaOverviewPalette.secondary)
                     if !accounts.isEmpty {
                         Button("清除搜索与筛选") {
@@ -184,12 +232,18 @@ struct QuotaOverviewView: View {
                         }
                         .buttonStyle(.bordered).controlSize(.large)
                         .accessibilityIdentifier("quota-reset-search")
+                    } else if let onAddService {
+                        Button("添加或加回服务", action: onAddService)
+                            .buttonStyle(.bordered).controlSize(.large)
+                            .accessibilityIdentifier("quota-empty-add-service")
                     }
                 }
                 .padding(20).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
                 QuotaReorderableGrid(accounts: results, pinnedID: mode == .preview ? pinnedID : nil,
-                    enabled: isActive && selectedID == nil,
+                    enabled: isActive && selectedID == nil && !showsNoticeExplanation,
+                    isEditing: isEditingCards,
+                    onRemove: removalAction,
                     onOpen: { id in
                         if let account = accounts.first(where: { $0.id == id }), account.value == .unknown,
                            let onConnectService { onConnectService(id) }
@@ -211,13 +265,12 @@ struct QuotaOverviewView: View {
         let needsConnection = mode == .notch && ["deepseek", "minimax-api"].contains(item.id) && item.value == .unknown
         return VStack(alignment: .leading, spacing: 16) {
             Button { selectedID = nil } label: {
-                Label("全部账户", systemImage: "chevron.left").font(.system(size: 13))
-                    .padding(.horizontal, 12).frame(height: 36)
+                    QuotaBackButtonLabel()
             }
             .buttonStyle(QuotaOverviewButtonStyle()).accessibilityIdentifier("quota-back")
             .keyboardShortcut(.cancelAction)
             .focused($focusedControl, equals: .back)
-            ScrollView {
+            ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(alignment: .firstTextBaseline) {
                         Text(item.name).font(.system(size: 22, weight: .semibold))
@@ -225,6 +278,14 @@ struct QuotaOverviewView: View {
                         Text(item.displayValue).font(.system(size: 24, weight: .semibold)).monospacedDigit()
                     }
                     Text(item.account).foregroundStyle(QuotaOverviewPalette.secondary)
+                    if onRemove != nil {
+                        Button { removeAccount(item.id) } label: {
+                            Label("从首页移除", systemImage: "minus.circle")
+                        }
+                        .buttonStyle(.bordered)
+                        .help("只隐藏这张卡片，不会断开连接；可在「连接」中加回")
+                        .accessibilityIdentifier("quota-detail-remove-\(item.id)")
+                    }
                     if let reason = item.displayReason {
                         Text(reason).font(.system(size: 13)).foregroundStyle(QuotaOverviewPalette.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -267,27 +328,40 @@ struct QuotaOverviewView: View {
 
     private var footer: some View {
         VStack(spacing: 4) {
+            if let lastRemoved, let onRestore {
+                HStack(spacing: 8) {
+                    Text("已移除 \(lastRemoved.name)，登录保留").font(.system(size: 10))
+                        .foregroundStyle(QuotaOverviewPalette.secondary).lineLimit(1)
+                    Spacer(minLength: 0)
+                    Button("撤销") { onRestore(lastRemoved.id); self.lastRemoved = nil }
+                        .buttonStyle(.bordered).controlSize(.small)
+                        .accessibilityIdentifier("quota-undo-remove")
+                }
+            } else if isEditingCards {
+                Text("点减号移除卡片，登录和后台同步保留")
+                    .font(.system(size: 10)).foregroundStyle(QuotaOverviewPalette.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             HStack(spacing: 12) {
                 Button { showsNoticeExplanation.toggle() } label: {
                     Label(noticeLabel ?? (mode == .notch ? "重置公告 · 待接入" : "重置公告单独展示"), systemImage: "bell")
-                        .font(.system(size: 11)).padding(.horizontal, 8).frame(height: 32)
+                        .font(.system(size: 11)).lineLimit(1).padding(.horizontal, 6).frame(height: 24)
                 }
-                .buttonStyle(QuotaOverviewButtonStyle())
-                .popover(isPresented: $showsNoticeExplanation) {
-                    if let noticeContent { noticeContent } else {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("公告 ≠ 个人额度重置").font(.headline)
-                        Text("公告功能尚未接入，不会发送通知。接入后保留消息来源、时间和确认状态；只有重新查询账户成功后，才更新个人额度。")
-                            .font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
-                    }.padding(20).frame(width: 300).background(QuotaOverviewPalette.surface)
-                    }
-                }
+                .buttonStyle(QuotaOverviewButtonStyle(isSelected: showsNoticeExplanation, quiet: true))
+                .accessibilityIdentifier("quota-reset-notice")
                 Spacer(minLength: 0)
                 Text(mode == .notch ? "\(accounts.count) 项服务" : pinned.map { "预览固定：\($0.name)" } ?? "\(accounts.count) 个账户")
                     .font(.system(size: 10)).foregroundStyle(QuotaOverviewPalette.secondary)
                     .lineLimit(1)
             }
         }
+    }
+
+    private func removeAccount(_ id: String) {
+        guard isActive, let account = accounts.first(where: { $0.id == id }), let onRemove else { return }
+        lastRemoved = (id, account.name)
+        if selectedID == id { selectedID = nil }
+        onRemove(id)
     }
 }
 
@@ -299,7 +373,7 @@ struct QuotaOverviewAccountCard: View {
 
     var body: some View {
         Button(action: onOpen) {
-            VStack(alignment: .leading, spacing: 9) {
+            VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 7) {
                     if let logo = ProviderBrandAssets.image(for: account.id) {
                         Image(nsImage: logo).renderingMode(.original).resizable().scaledToFit()
@@ -318,15 +392,18 @@ struct QuotaOverviewAccountCard: View {
                     }
                 }
                 if account.visiblePools.count == 2 {
-                    HStack(alignment: .top, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 3) {
                         ForEach(Array(account.visiblePools.enumerated()), id: \.offset) { _, pool in
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(pool.label).font(.system(size: 9)).foregroundStyle(secondaryColor)
+                            VStack(alignment: .leading, spacing: 1) {
+                                HStack(alignment: .firstTextBaseline, spacing: 3) {
+                                    Text(pool.label).font(.system(size: 9)).foregroundStyle(secondaryColor)
+                                        .lineLimit(1).minimumScaleFactor(0.8)
+                                    Spacer(minLength: 0)
+                                    Text(pool.value.text).font(.system(size: 15, weight: .medium)).monospacedDigit()
+                                        .foregroundStyle(amountColor(pool.value)).lineLimit(1).minimumScaleFactor(0.8)
+                                }
+                                Text(compactTiming(pool.timing)).font(.system(size: 8.5)).foregroundStyle(secondaryColor)
                                     .lineLimit(1).minimumScaleFactor(0.8)
-                                Text(pool.value.text).font(.system(size: 17, weight: .medium)).monospacedDigit()
-                                    .foregroundStyle(amountColor(pool.value)).lineLimit(1).minimumScaleFactor(0.65)
-                                Text(compactTiming(pool.timing)).font(.system(size: 9)).foregroundStyle(secondaryColor)
-                                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                             }.frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
@@ -341,8 +418,8 @@ struct QuotaOverviewAccountCard: View {
                 }
                 Spacer(minLength: 0)
             }
-            .padding(10).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .padding(8).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         }
         .buttonStyle(QuotaBubbleButtonStyle(kind: account.kind, interaction: interaction))
         .foregroundStyle(QuotaOverviewPalette.primary)
@@ -381,9 +458,9 @@ struct QuotaOverviewAccountCard: View {
     }
     private var secondaryColor: Color {
         switch account.kind {
-        case .membership: Color(white: 0.72)
-        case .api: Color(red: 0.65, green: 0.76, blue: 0.85)
-        case .audio: Color(red: 0.78, green: 0.72, blue: 0.85)
+        case .membership: Color(white: 0.78)
+        case .api: Color(red: 0.70, green: 0.80, blue: 0.88)
+        case .audio: Color(red: 0.82, green: 0.78, blue: 0.88)
         }
     }
     private func amountColor(_ value: QuotaOverviewValue) -> Color {
@@ -394,7 +471,7 @@ struct QuotaOverviewAccountCard: View {
     }
 }
 
-/// Opaque, softly raised bubbles: no wallpaper/text bleed, no layout-moving scale effect.
+/// A quiet convex surface, not per-card WebKit/blur or an idle decorative effect.
 private struct QuotaBubbleButtonStyle: ButtonStyle {
     let kind: QuotaOverviewKind
     var interaction: QuotaCardInteraction? = nil
@@ -404,48 +481,76 @@ private struct QuotaBubbleButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         let pressed = interaction?.pressed ?? configuration.isPressed
         let hovered = interaction?.hovered ?? isHovered
-        let lift = interaction?.lifted == true ? 0.08 : pressed ? 0.09 : hovered ? 0.05 : 0
+        let lift = interaction?.lifted == true ? 0.065 : pressed ? -0.025 : hovered ? 0.035 : 0
         configuration.label
             .background {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(surface(lift: lift))
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(LinearGradient(colors: [surface(lift: lift + 0.035), surface(lift: lift - 0.015)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .strokeBorder(Color.white.opacity(pressed ? 0.04 : 0.08), lineWidth: 0.5)
+                        RoundedRectangle(cornerRadius: 24, style: .continuous)
+                            .strokeBorder(LinearGradient(colors: [.white.opacity(pressed ? 0.08 : 0.20),
+                                .white.opacity(0.025)], startPoint: .top, endPoint: .bottom), lineWidth: 0.7)
                     }
-                    .animation(reduceMotion || pressed ? nil : QuotaInteractionMotion.feedback, value: pressed)
-                    .animation(reduceMotion ? nil : QuotaInteractionMotion.feedback, value: hovered)
+                    .shadow(color: .black.opacity(pressed ? 0.05 : 0.12), radius: pressed ? 1 : 2.5, x: 0, y: pressed ? 0 : 1.5)
             }
+            .scaleEffect(!reduceMotion && pressed && interaction?.lifted != true ? 0.985 : 1)
+            .animation(reduceMotion || pressed ? nil : QuotaInteractionMotion.feedback, value: pressed)
+            .animation(reduceMotion ? nil : QuotaInteractionMotion.feedback, value: hovered)
             .onHover { isHovered = $0 }
     }
 
     private func surface(lift: Double) -> Color {
         switch kind {
-        case .membership: Color(white: 0.13 + lift)
-        case .api: Color(red: 0.085 + lift, green: 0.125 + lift, blue: 0.17 + lift)
-        case .audio: Color(red: 0.135 + lift, green: 0.105 + lift, blue: 0.17 + lift)
+        case .membership: Color(white: 0.22 + lift)
+        case .api: Color(red: 0.16 + lift, green: 0.22 + lift, blue: 0.28 + lift)
+        case .audio: Color(red: 0.24 + lift, green: 0.19 + lift, blue: 0.28 + lift)
         }
     }
 }
 
 /// Styling only. SwiftUI Button retains native press/release, cancellation,
 /// focus and accessibility semantics; no tap/drag recognizer replaces them.
+struct QuotaBackButtonLabel: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold))
+            Text("全部账户").font(.system(size: 12, weight: .medium))
+        }
+        .padding(.horizontal, 12).frame(minWidth: 98, minHeight: 32)
+        .fixedSize(horizontal: true, vertical: true)
+    }
+}
+
 struct QuotaOverviewButtonStyle: ButtonStyle {
+    var isSelected = false
+    var quiet = false
+    var cornerRadius: CGFloat = 10
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
 
     func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed && isEnabled
+        let lift = pressed ? -0.035 : isHovered && isEnabled ? 0.045 : 0
         configuration.label
-            .contentShape(Rectangle())
+            .foregroundStyle(isSelected ? Color(red: 0.74, green: 0.86, blue: 1) : QuotaOverviewPalette.primary)
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .background {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.white.opacity(!isEnabled ? 0 : configuration.isPressed ? 0.13 : isHovered ? 0.06 : 0))
-                    .animation(reduceMotion || configuration.isPressed ? nil : QuotaInteractionMotion.feedback,
-                               value: configuration.isPressed)
-                    .animation(reduceMotion ? nil : QuotaInteractionMotion.feedback, value: isHovered)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(LinearGradient(colors: [Color(white: 0.29 + lift), Color(white: 0.23 + lift)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .strokeBorder(LinearGradient(colors: [.white.opacity(pressed ? 0.05 : 0.16), .white.opacity(0.03)],
+                                startPoint: .top, endPoint: .bottom), lineWidth: 0.6)
+                    }
+                    .opacity(quiet && !isHovered && !pressed && !isSelected ? 0 : 1)
             }
+            .scaleEffect(!reduceMotion && pressed ? 0.97 : 1)
             .opacity(isEnabled ? 1 : 0.45)
+            .animation(reduceMotion || pressed ? nil : QuotaInteractionMotion.feedback, value: pressed)
+            .animation(reduceMotion ? nil : QuotaInteractionMotion.feedback, value: isHovered)
             .onHover { isHovered = $0 }
     }
 }
@@ -453,7 +558,42 @@ struct QuotaOverviewButtonStyle: ButtonStyle {
 enum QuotaOverviewPalette {
     static let primary = Color(white: 0.96)
     static let secondary = Color(white: 0.66)
-    static let surface = Color(white: 0.095)
+    static let surface = Color(white: 0.19)
+}
+
+/// A restrained native material rim; quota text stays on opaque reading surfaces.
+struct QuotaPanelBackdrop: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    var body: some View {
+        RoundedRectangle(cornerRadius: 22, style: .continuous)
+            .fill(.regularMaterial)
+            .overlay {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color(white: 0.14).opacity(reduceTransparency ? 1 : 0.82))
+            }
+            .allowsHitTesting(false).accessibilityHidden(true)
+    }
+}
+
+/// The hardware band stays black; its lower edge fades into the actual material
+/// instead of guessing an opaque gray that changes with the desktop behind it.
+struct QuotaDockedTopBlend: View {
+    let topInset: CGFloat
+    var body: some View {
+        let start = max(0, topInset - 4)
+        let height = start + 60
+        // Smootherstep has zero slope at both ends: no abrupt start or gray lip.
+        let stops = (0...12).map { index -> Gradient.Stop in
+            let t = Double(index) / 12
+            let fade = t * t * t * (t * (t * 6 - 15) + 10)
+            return .init(color: .black.opacity(1 - fade),
+                         location: (start + CGFloat(t) * 60) / height)
+        }
+        LinearGradient(stops: [.init(color: .black, location: 0)] + stops,
+                       startPoint: .top, endPoint: .bottom)
+            .frame(height: height)
+            .allowsHitTesting(false).accessibilityHidden(true)
+    }
 }
 
 /// Timing adapted from TO-DO Panel v1.1.2 renderer/styles.css (MIT).

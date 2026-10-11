@@ -60,12 +60,22 @@ actor TestResetTransport {
         try await Task.sleep(for: .milliseconds(30))
         check(await transport.calls == 0, "Startup without explicit connections must not make new provider requests")
         vault.denied = true
-        check(!store.connectDeepSeek("test-valid-not-secret"), "Failed secure save must not enable a connection")
+        check(store.connectDeepSeek("test-valid-not-secret"), "Starting verification is not a completed secure-save claim")
+        await settle(store)
         check(!store.deepSeekEnabled && vault.key == nil, "Rejected credentials cannot be published or silently retained")
         vault.denied = false
         check(store.connectDeepSeek("test-valid-not-secret"), "An explicit valid key enables only the requested source")
         await settle(store)
         check(store.deepSeekSnapshot?.entries.first?.total == Decimal(string: "6.77"), "Publish the actual parsed balance after successful read")
+        await transport.configure(status: 401, delayed: true)
+        check(store.connectDeepSeek("test-rejected-candidate"), "Candidate replacement starts a bounded read")
+        check(vault.key == "test-valid-not-secret" && store.deepSeekSnapshot != nil,
+              "An unverified candidate cannot overwrite the working credential or remove its balance")
+        await settle(store)
+        check(vault.key == "test-valid-not-secret" && store.deepSeekEnabled && !store.deepSeekNeedsAuthorization
+              && store.deepSeekSnapshot?.entries.first?.total == Decimal(string: "6.77"),
+              "A rejected candidate preserves the established account for automatic recovery")
+        await transport.configure(status: 200)
         let cadenceClock = CadenceClock()
         let cadence = QuotaConnectionsStore(defaults: defaults, vault: vault, allowsConnections: true,
             transport: { try await transport.fetch($0) }, clock: { cadenceClock.now })
@@ -104,8 +114,8 @@ actor TestResetTransport {
               "Authorization failure must not present another account's cached balance")
         await transport.configure(status: 200, delayed: true)
         _ = store.connectDeepSeek("replacement-test-key")
-        check(!store.connectDeepSeek("double-submit-test-key") && vault.key == "replacement-test-key",
-              "Submitting twice while connecting must not replace the in-flight credential")
+        check(!store.connectDeepSeek("double-submit-test-key") && vault.key == "test-valid-not-secret",
+              "Submitting twice while verifying cannot replace either the pending or saved credential")
         let beforeBurst = await transport.calls
         for _ in 0..<10 { store.refreshDeepSeek(force: true) }
         try await Task.sleep(for: .milliseconds(20))
@@ -121,8 +131,9 @@ actor TestResetTransport {
         isolated.setFeedEnabled(true)
         check(!isolated.feedEnabled, "An isolated preview cannot silently enable public networking")
         let feedTransport = TestResetTransport()
+        let feedClock = CadenceClock()
         let feedStore = QuotaConnectionsStore(defaults: defaults, vault: vault, allowsConnections: true,
-                                             transport: { try await feedTransport.fetch($0) })
+                                             transport: { try await feedTransport.fetch($0) }, clock: { feedClock.now })
         feedStore.setFeedEnabled(true)
         await settleFeed(feedStore)
         check(feedStore.feedSnapshot?.events.count == 1 && !feedStore.hasUnreadFeed,
@@ -130,13 +141,19 @@ actor TestResetTransport {
         await feedTransport.configure(status: 304)
         feedStore.refreshFeed(force: true)
         await settleFeed(feedStore)
+        check(await feedTransport.calls == 1, "Manual refresh respects the upstream ten-minute request floor")
+        feedClock.now = feedClock.now.addingTimeInterval(600)
+        feedStore.refreshFeed(force: true)
+        await settleFeed(feedStore)
         check(await feedTransport.etagReceived == "test-etag" && feedStore.feedSnapshot?.events.count == 1 && feedStore.feedError == nil,
               "Conditional refresh preserves a valid snapshot on 304")
         await feedTransport.configure(status: 200, empty: true)
+        feedClock.now = feedClock.now.addingTimeInterval(600)
         feedStore.refreshFeed(force: true)
         await settleFeed(feedStore)
         check(feedStore.feedSnapshot?.events.isEmpty == true, "A withdrawn event disappears through full snapshot replacement")
         await feedTransport.configure(status: 429)
+        feedClock.now = feedClock.now.addingTimeInterval(600)
         feedStore.refreshFeed(force: true)
         await settleFeed(feedStore)
         let countAtRateLimit = await feedTransport.calls

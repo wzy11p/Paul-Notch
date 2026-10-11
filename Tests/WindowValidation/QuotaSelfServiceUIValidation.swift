@@ -32,7 +32,9 @@ import WebKit
                                       allowsConnections: false, transport: { _ in throw QuotaConnectionError.preview }),
             desktop: DesktopQuotaStore(defaults: defaults, allowsReads: false, reader: { _, _ in
                 throw DesktopQuotaFailure.preview
-            }))
+            }), customAPIs: CustomQuotaConnectionsStore(registry: CustomQuotaDefaultsRegistry(defaults: defaults),
+                allowsConnections: false, vault: { _ in IsolatedConnectionVault() },
+                transport: { _ in throw QuotaConnectionError.preview }))
         let codex = CodexStatusStore()
         let home = QuotaHomeView(codexStatus: codex, connections: connections, tools: [],
                                  onSelectTool: { _ in }, onClose: {})
@@ -47,6 +49,7 @@ import WebKit
                 selectedProvider: .constant(id), codexReadsEnabled: false, isCodexRefreshing: false,
                 onCheckCodex: {}, onClose: {})
         }
+        try verifyContinuousBackdrop(manager(nil), to: output.appendingPathComponent("connection-top-blend.png"))
         let muse = try renderText(manager("muse"), to: output.appendingPathComponent("self-service-muse.png"))
         guard muse.contains("Meta Muse"), muse.contains("尚不能自动同步"),
               !muse.contains("保存并查询余额"), !muse.contains("粘贴 Key") else {
@@ -54,6 +57,10 @@ import WebKit
             exit(1)
         }
         let catalog = try renderText(manager(nil), to: output.appendingPathComponent("self-service-catalog.png"))
+        guard catalog.contains("搜索平台"), catalog.contains("自定义 API") else {
+            print("FAIL: users must be able to find a platform or start a custom quota API without asking an AI")
+            exit(1)
+        }
         guard catalog.contains("可直接连接"), catalog.contains("暂不支持自动同步") else {
             print("FAIL: setup must separate working connectors from unsupported memberships before the user chooses")
             exit(1)
@@ -62,6 +69,42 @@ import WebKit
             print("FAIL: the catalog must show the actual key and local-login connection choices")
             exit(1)
         }
+        let customForm = try renderText(manager("custom-api"), to: output.appendingPathComponent("self-service-custom-api.png"))
+        guard customForm.contains("只读额度接口"), customForm.contains("粘贴 Key"), customForm.contains("验证只读接口"),
+              !customForm.contains("保存并开始") else {
+            print("FAIL: custom setup must visibly separate endpoint/key verification from saving an unverified account"); exit(1)
+        }
+        let openRouter = try renderText(manager("custom-api-openrouter"), to: output.appendingPathComponent("self-service-openrouter.png"))
+        guard openRouter.contains("OpenRouter"), openRouter.contains("管理 Key"), openRouter.contains("GET"),
+              !openRouter.contains("美元余额") else {
+            print("FAIL: the preset must disclose the real key scope/destination without inventing a live quota"); exit(1)
+        }
+        guard QuotaServiceCatalog.matches(accounts.first { $0.id == "codex" }!, query: "OpenAI"),
+              !QuotaServiceCatalog.matches(accounts.first { $0.id == "grok" }!, query: "SuperGrok"),
+              accounts.filter({ QuotaServiceCatalog.matches($0, query: "Kimi") }).isEmpty else {
+            print("FAIL: discovery cannot conflate unrelated memberships or fabricate support for an unadapted platform"); exit(1)
+        }
+        let realFields = CustomQuotaConnectionsStore(registry: CustomQuotaDefaultsRegistry(defaults: defaults),
+            allowsConnections: true, vault: { _ in IsolatedConnectionVault() }, transport: { _ in
+                .init(status: 200, data: Data(#"{"data":{"total_credits":50.25,"total_usage":13.50}}"#.utf8), etag: nil)
+            })
+        realFields.verify(name: "OpenRouter API", endpoint: QuotaServiceCatalog.openRouter.endpoint,
+                          auth: .bearer, key: "fixture-ui-only")
+        for _ in 0..<100 {
+            if !realFields.isVerifying { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let fields = try renderText(ScrollView {
+            CustomQuotaConnectionView(store: realFields, preset: QuotaServiceCatalog.openRouter, onConnected: { _ in })
+                .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        }.foregroundStyle(QuotaOverviewPalette.primary).background(QuotaOverviewPalette.surface)
+            .preferredColorScheme(.dark), to: output.appendingPathComponent("self-service-custom-fields.png"))
+        guard fields.contains("$36.75"), fields.contains("尚未保存"), fields.contains("自动更新"),
+              !fields.contains("fixture-ui-only"), realFields.definitions.isEmpty else {
+            print("FAIL: the native field mapping must preview only genuine selected amounts and never expose a Key or claim connection before save");
+            print("Fixture OCR: \(fields)"); exit(1)
+        }
+        realFields.stop()
         let keyForm = try renderText(manager("deepseek"), to: output.appendingPathComponent("self-service-key.png"))
         guard keyForm.contains("在这里获取"), keyForm.contains("粘贴") else {
             print("FAIL: a new API connection must expose in-app key acquisition and an explicit paste action, not only an external website link")
@@ -285,4 +328,37 @@ import WebKit
         return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
     }
     enum Failure: Error { case render }
+
+    @MainActor private static func verifyContinuousBackdrop<V: View>(_ connection: V, to url: URL) throws {
+        let view = ZStack(alignment: .top) {
+            QuotaPanelBackdrop()
+            QuotaDockedTopBlend(topInset: 20)
+            connection.padding(.top, 36)
+        }.preferredColorScheme(.dark)
+        let host = NSHostingView(rootView: view)
+        host.sizingOptions = []
+        host.frame = NSRect(x: 0, y: 0, width: 760, height: 500)
+        host.layoutSubtreeIfNeeded()
+        guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { throw Failure.render }
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        try bitmap.representation(using: .png, properties: [:])!.write(to: url)
+        let scale = Double(bitmap.pixelsHigh) / 500
+        var previous = 0.0
+        for point in stride(from: 24, through: 104, by: 2) {
+            // Sample the clear rim, not the new search field/control surfaces.
+            // The old opaque page background covers this rim too and fails here.
+            guard let color = bitmap.colorAt(x: Int(6 * scale), y: Int(Double(point) * scale))?
+                .usingColorSpace(.deviceRGB) else { throw Failure.render }
+            let level = 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
+            guard level + 0.007 >= previous else {
+                print("FAIL: the real connection route must not turn the graphite top fade back into an opaque black stripe at y=\(point)")
+                exit(1)
+            }
+            previous = level
+        }
+        guard previous > 0.06 else {
+            print("FAIL: the connection page must share the same graphite surface as Home")
+            exit(1)
+        }
+    }
 }

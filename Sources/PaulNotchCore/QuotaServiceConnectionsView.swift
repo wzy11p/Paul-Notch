@@ -10,9 +10,14 @@ struct QuotaServiceConnectionsView: View {
     let onCheckCodex: () -> Void
     let onClose: () -> Void
     var onCollapse: () -> Void = {}
+    var hiddenIDs: Set<String> = []
+    var onShowInHome: (String) -> Void = { _ in }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var search = ""
 
     private var selected: QuotaOverviewAccount? { accounts.first { $0.id == selectedProvider } }
+    private var customStore: CustomQuotaConnectionsStore? { connections.customAPIs as? CustomQuotaConnectionsStore }
+    private var isNewCustom: Bool { ["custom-api", "custom-api-openrouter"].contains(selectedProvider ?? "") }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -21,23 +26,28 @@ struct QuotaServiceConnectionsView: View {
                     if selectedProvider != nil { selectedProvider = nil } else { onClose() }
                 } label: {
                     Label(selectedProvider == nil ? "返回首页" : "选择服务", systemImage: "chevron.left")
-                        .font(.system(size: 12)).padding(.horizontal, 10).frame(height: 36)
+                        .font(.system(size: 12, weight: .medium)).padding(.horizontal, 10).frame(height: 30)
                 }
                 .buttonStyle(QuotaOverviewButtonStyle())
                 // Keep Escape available after the focused key field is removed.
                 .keyboardShortcut(.cancelAction)
-                Text(selected?.name ?? "添加服务").font(.system(size: 20, weight: .semibold))
+                Text(isNewCustom ? (selectedProvider == "custom-api-openrouter" ? "OpenRouter API" : "自定义 API")
+                     : selected?.name ?? "添加服务").font(.system(size: 20, weight: .semibold))
                 Spacer(minLength: 0)
                 Button(action: onCollapse) {
                     Label("收起", systemImage: "chevron.up")
-                        .font(.system(size: 12, weight: .medium)).padding(.horizontal, 10).frame(height: 36)
+                        .font(.system(size: 12, weight: .medium)).padding(.horizontal, 10).frame(height: 30)
                 }
                 .buttonStyle(QuotaOverviewButtonStyle())
                 .help("收起面板，保留登录和后台同步")
                 .accessibilityIdentifier("quota-connection-collapse")
             }
-            if let selected {
-                if let website = connections.websiteMemberships[selected.id] {
+            if isNewCustom {
+                customConnection(nil)
+            } else if let selected {
+                if let definition = customStore?.definitions.first(where: { $0.id == selected.id }) {
+                    customConnection(definition)
+                } else if let website = connections.websiteMemberships[selected.id] {
                     WebsiteQuotaConnectionView(store: website)
                         .padding(14).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .background(QuotaOverviewPalette.surface, in: RoundedRectangle(cornerRadius: 16))
@@ -51,23 +61,78 @@ struct QuotaServiceConnectionsView: View {
                     .transition(QuotaInteractionMotion.entrance)
                 }
             } else {
-                Text("选一个服务，按提示连接。无需填写接口地址或其他技术参数。")
+                HStack(spacing: 10) {
+                    TextField("搜索平台或官网", text: $search).textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("quota-connect-search")
+                    Button { selectedProvider = "custom-api" } label: {
+                        Text("自定义 API").font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 12).frame(height: 30)
+                    }
+                        .buttonStyle(QuotaOverviewButtonStyle())
+                        .accessibilityIdentifier("quota-add-custom-api")
+                }
+                Text(hiddenIDs.isEmpty ? "选已适配服务，或添加提供只读余额接口的 API。桌面会员与 API 钱包分开。"
+                     : "已移除的卡片可直接加回首页，原有登录保留。")
                     .font(.system(size: 12)).foregroundStyle(QuotaOverviewPalette.secondary)
+                if let error = customStore?.registryError {
+                    Text(error).font(.system(size: 12)).foregroundStyle(.orange)
+                }
                 ScrollView {
-                    serviceGrid(accounts)
+                    let matches = accounts.filter { QuotaServiceCatalog.matches($0, query: search) }
+                    VStack(alignment: .leading, spacing: 14) {
+                        serviceGrid(matches)
+                        if QuotaServiceCatalog.showsOpenRouter(query: search) {
+                            Button { selectedProvider = "custom-api-openrouter" } label: {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("OpenRouter API").font(.system(size: 13, weight: .semibold))
+                                        Text("只读充值余额 · 使用管理 Key").font(.system(size: 11))
+                                            .foregroundStyle(QuotaOverviewPalette.secondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right").font(.system(size: 10))
+                                }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                            }.buttonStyle(QuotaOverviewButtonStyle(cornerRadius: 16))
+                                .accessibilityIdentifier("quota-connect-openrouter")
+                        } else if matches.isEmpty {
+                            Text("暂未适配这个产品").font(.system(size: 16, weight: .semibold))
+                            Text("没有对应的额度读取方式，不能只填官网或登录密码就连接。若平台提供只读余额 API，可用上方「自定义 API」验证；否则暂不能自动同步。")
+                                .font(.system(size: 12)).foregroundStyle(QuotaOverviewPalette.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
             }
         }
         .padding(12).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .foregroundStyle(QuotaOverviewPalette.primary).background(Color.black)
+        .foregroundStyle(QuotaOverviewPalette.primary).background(Color.clear)
         .preferredColorScheme(.dark)
         .animation(QuotaInteractionMotion.content(reduceMotion: reduceMotion), value: selectedProvider)
+    }
+
+    @ViewBuilder private func customConnection(_ definition: CustomQuotaDefinition?) -> some View {
+        ScrollView {
+            if let store = customStore {
+                CustomQuotaConnectionView(store: store, definition: definition,
+                    preset: selectedProvider == "custom-api-openrouter" ? QuotaServiceCatalog.openRouter : nil,
+                    onConnected: { id in onShowInHome(id) })
+                    .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text("当前预览未启用自定义 API 连接，请在正式版添加。")
+                    .font(.system(size: 12)).padding(16)
+            }
+        }
+        .background(QuotaOverviewPalette.surface, in: RoundedRectangle(cornerRadius: 16))
+        .id(selectedProvider)
     }
 
     private func serviceGrid(_ items: [QuotaOverviewAccount]) -> some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
             ForEach(items) { account in
-                Button { selectedProvider = account.id } label: {
+                Button {
+                    if hiddenIDs.contains(account.id) { onShowInHome(account.id) }
+                    else { selectedProvider = account.id }
+                } label: {
                     HStack(spacing: 12) {
                         if let image = ProviderBrandAssets.image(for: account.id) {
                             Image(nsImage: image).renderingMode(.original).resizable().scaledToFit()
@@ -75,18 +140,20 @@ struct QuotaServiceConnectionsView: View {
                         }
                         VStack(alignment: .leading, spacing: 5) {
                             Text(account.name).font(.system(size: 13, weight: .semibold))
-                            Text(methodLabel(account.id)).font(.system(size: 11))
+                            Text(hiddenIDs.contains(account.id) ? "已从首页移除" : methodLabel(account.id)).font(.system(size: 11))
                                 .foregroundStyle(QuotaOverviewPalette.secondary)
                         }
                         Spacer(minLength: 0)
-                        Image(systemName: "chevron.right").font(.system(size: 10))
+                        if hiddenIDs.contains(account.id) {
+                            Text("加回首页").font(.system(size: 11, weight: .medium))
+                        } else { Image(systemName: "chevron.right").font(.system(size: 10)) }
                     }
                     .padding(12).frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
                     .contentShape(RoundedRectangle(cornerRadius: 16))
                 }
-                .buttonStyle(QuotaOverviewButtonStyle())
-                .background(QuotaOverviewPalette.surface, in: RoundedRectangle(cornerRadius: 16))
+                .buttonStyle(QuotaOverviewButtonStyle(cornerRadius: 16))
                 .accessibilityIdentifier("quota-connect-\(account.id)")
+                .accessibilityLabel(hiddenIDs.contains(account.id) ? "将 \(account.name) 加回首页，保留原有连接" : account.name)
             }
         }
     }
@@ -148,7 +215,8 @@ struct QuotaServiceConnectionsView: View {
     }
 
     private func methodLabel(_ id: String) -> String {
-        switch id {
+        if id.hasPrefix("custom-") { return "自定义只读接口 · 管理连接" }
+        return switch id {
         case "cursor", "grok": connections.cursorAccount == nil ? "不用密钥 · 读取原应用额度页" : "一次官方登录 · 后台自动同步"
         case "doubao": connections.websiteMemberships[id] == nil ? "不用密钥 · 读取原应用额度页" : "官方登录 · 两套额度分别同步"
         case "minimax-audio": connections.websiteMemberships[id] == nil ? "暂不支持自动同步" : "官方登录 · 配音声贝单独同步"

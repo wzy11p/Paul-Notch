@@ -54,18 +54,19 @@ struct QuotaOverviewModelValidation {
         for width in [360.0, 600, 820] {
             for count in [0, 1, 4, 7, 12, 30] {
                 let layout = QuotaBentoLayout(width: width, accountCount: count)
-                check(layout.columns >= 2 && layout.columns <= 6, "Bento uses a bounded column count")
-                check(layout.cardWidth >= 110 && layout.cardWidth <= 118,
+                check(layout.columns >= 1 && layout.columns <= 8 && layout.columns <= max(1, count),
+                      "Bento uses available columns without empty phantom slots for sparse accounts")
+                check(layout.cardWidth >= 108 && layout.cardWidth <= 110,
                       "Equal square cards stay compact without shrinking into tiny targets")
-                check(layout.spacing >= 18 && layout.cardWidth * Double(layout.columns)
+                check(layout.spacing >= 14 && layout.cardWidth * Double(layout.columns)
                           + layout.spacing * Double(layout.columns - 1) <= width,
                       "Smaller bubbles must have breathing room and remain inside the fixed panel")
             }
         }
         check(QuotaBentoLayout(width: 552, accountCount: 7).columns == 4,
               "The compact notch fits four equal square cards per row")
-        check(QuotaBentoLayout(width: 820, accountCount: 4).columns == 6,
-              "A wider surface must not turn four square cards into oversized rectangles")
+        check(QuotaBentoLayout(width: 820, accountCount: 4).columns == 4,
+              "Four cards on a wide manual surface remain equal bubbles, centered without phantom columns")
         guard failures.isEmpty else { exit(1) }
         print("PASS: quota search, 0/4/12/30 accounts, separate pools, truthful units and unknown states")
     }

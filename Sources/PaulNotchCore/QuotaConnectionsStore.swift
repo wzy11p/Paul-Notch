@@ -14,6 +14,15 @@ extension QuotaCredentialStoring {
     func saveForRefresh(_ value: String) throws { try save(value) }
 }
 
+/// Additional API accounts share this store's polling owner, not another timer.
+@MainActor protocol CustomQuotaProviding: AnyObject {
+    var changes: ObservableObjectPublisher { get }
+    var isRefreshing: Bool { get }
+    func refreshDue(force: Bool)
+    func stop()
+    func accounts(now: Date) -> [QuotaOverviewAccount]
+}
+
 @MainActor final class QuotaConnectionsStore: ObservableObject {
     @Published private(set) var deepSeekEnabled = false
     @Published private(set) var feedEnabled = false
@@ -32,10 +41,14 @@ extension QuotaCredentialStoring {
     let desktop: DesktopQuotaStore?
     let cursorAccount: CursorQuotaAccountStore?
     let websiteMemberships: [String: WebsiteQuotaStore]
+    let customAPIs: (any CustomQuotaProviding)?
+    /// Local reminder evaluation shares the existing source dispatch; no additional reader/timer.
+    var onRefreshTick: (() -> Void)?
     private var miniMaxChanges: AnyCancellable?
     private var desktopChanges: AnyCancellable?
     private var cursorChanges: AnyCancellable?
     private var websiteChanges: [AnyCancellable] = []
+    private var customChanges: AnyCancellable?
     private let defaults: UserDefaults
     private let vault: any QuotaCredentialStoring
     private let transport: @Sendable (URLRequest) async throws -> QuotaHTTPResponse
@@ -59,6 +72,7 @@ extension QuotaCredentialStoring {
          miniMax: MiniMaxWalletStore? = nil, desktop: DesktopQuotaStore? = nil,
          cursorAccount: CursorQuotaAccountStore? = nil,
          websiteMemberships: [String: WebsiteQuotaStore] = [:],
+         customAPIs: (any CustomQuotaProviding)? = nil,
          clock: @escaping () -> Date = Date.init) {
         self.defaults = defaults
         self.vault = vault
@@ -69,6 +83,7 @@ extension QuotaCredentialStoring {
         self.desktop = desktop
         self.cursorAccount = cursorAccount
         self.websiteMemberships = websiteMemberships
+        self.customAPIs = customAPIs
         deepSeekEnabled = allowsConnections && defaults.bool(forKey: "quota.deepseek.enabled.v1")
         feedEnabled = allowsConnections && defaults.bool(forKey: "quota.reset-feed.enabled.v1")
         miniMaxChanges = miniMax?.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
@@ -77,6 +92,7 @@ extension QuotaCredentialStoring {
         websiteChanges = websiteMemberships.values.map { store in
             store.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         }
+        customChanges = customAPIs?.changes.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     func start() {
@@ -87,10 +103,13 @@ extension QuotaCredentialStoring {
         desktop?.start()
         cursorAccount?.refreshDue()
         for membership in websiteMemberships.values { membership.refreshDue() }
+        customAPIs?.refreshDue(force: false)
         let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshDeepSeek(); self?.refreshFeed(); self?.miniMax?.refresh(); self?.cursorAccount?.refreshDue()
                 if let self { for membership in self.websiteMemberships.values { membership.refreshDue() } }
+                self?.customAPIs?.refreshDue(force: false)
+                self?.onRefreshTick?()
             }
         }
         timer.tolerance = 2
@@ -104,6 +123,7 @@ extension QuotaCredentialStoring {
         desktop?.refreshDue(force: true)
         cursorAccount?.refreshDue(force: true)
         for membership in websiteMemberships.values { membership.refreshDue(force: true) }
+        customAPIs?.refreshDue(force: true)
     }
     func stop() {
         timer?.invalidate(); timer = nil
@@ -116,22 +136,18 @@ extension QuotaCredentialStoring {
         desktop?.stop()
         cursorAccount?.stop()
         for membership in websiteMemberships.values { membership.stop() }
+        customAPIs?.stop()
     }
 
     @discardableResult func connectDeepSeek(_ key: String) -> Bool {
         guard allowsConnections else { deepSeekError = QuotaConnectionError.preview.localizedDescription; return false }
         guard !isDeepSeekRefreshing else { return false }
+        guard clock() >= deepSeekRateLimitedUntil else { deepSeekError = QuotaConnectionError.rateLimited.localizedDescription; return false }
         do {
             _ = try QuotaReadRequest.deepSeek(key: key)
-            try vault.save(key)
-            deepSeekSessionKey = key
-            deepSeekKeychainBlocked = false
-            deepSeekGeneration += 1; deepSeekTask?.cancel(); deepSeekTask = nil
-            deepSeekSnapshot = nil; deepSeekError = nil; deepSeekNeedsAuthorization = false
-            deepSeekFailures = 0; deepSeekNextAttempt = .distantPast; deepSeekRateLimitedUntil = .distantPast
-            deepSeekEnabled = true
-            defaults.set(true, forKey: "quota.deepseek.enabled.v1")
-            refreshDeepSeek(force: true)
+            // Starting verification is not success. A candidate never replaces
+            // the saved account until its actual balance and secure save succeed.
+            queryDeepSeek(candidateKey: key)
             return true
         } catch { deepSeekError = Self.message(error); return false }
     }
@@ -163,14 +179,18 @@ extension QuotaCredentialStoring {
         let now = clock()
         guard allowsConnections, deepSeekEnabled, !deepSeekNeedsAuthorization, deepSeekTask == nil,
               now >= deepSeekRateLimitedUntil, force || now >= deepSeekNextAttempt else { return }
+        queryDeepSeek(candidateKey: nil)
+    }
+    private func queryDeepSeek(candidateKey: String?) {
         isDeepSeekRefreshing = true
+        deepSeekError = nil
         let generation = deepSeekGeneration
         deepSeekTask = Task { [weak self] in
             guard let self else { return }
             defer { if generation == deepSeekGeneration { deepSeekTask = nil; isDeepSeekRefreshing = false } }
             do {
-                guard let key = try deepSeekSessionKey ?? vault.read() else { throw QuotaConnectionError.authentication }
-                deepSeekSessionKey = key
+                guard let key = try candidateKey ?? deepSeekSessionKey ?? vault.read() else { throw QuotaConnectionError.authentication }
+                if candidateKey == nil { deepSeekSessionKey = key }
                 let response = try await transport(QuotaReadRequest.deepSeek(key: key))
                 guard generation == deepSeekGeneration, !Task.isCancelled else { return }
                 if [429, 503].contains(response.status), let delay = response.retryAfter {
@@ -178,6 +198,9 @@ extension QuotaCredentialStoring {
                 }
                 try Self.validateStatus(response.status)
                 let snapshot = try DeepSeekBalance.decode(response.data, at: clock())
+                if let candidateKey { try vault.save(candidateKey) }
+                deepSeekSessionKey = key; deepSeekKeychainBlocked = false; deepSeekNeedsAuthorization = false
+                deepSeekEnabled = true; defaults.set(true, forKey: "quota.deepseek.enabled.v1")
                 deepSeekSnapshot = snapshot; deepSeekError = nil; deepSeekFailures = 0
                 deepSeekNextAttempt = clock().addingTimeInterval(30)
             } catch {
@@ -185,10 +208,10 @@ extension QuotaCredentialStoring {
                 deepSeekError = Self.message(error)
                 deepSeekFailures += 1
                 deepSeekNextAttempt = clock().addingTimeInterval(Self.backoff(deepSeekFailures, base: 30))
-                if case QuotaConnectionError.authentication = error {
+                if case QuotaConnectionError.authentication = error, candidateKey == nil {
                     deepSeekNeedsAuthorization = true; deepSeekSnapshot = nil; deepSeekSessionKey = nil
                 }
-                if case QuotaConnectionError.keychain = error {
+                if case QuotaConnectionError.keychain = error, candidateKey == nil {
                     deepSeekNeedsAuthorization = true; deepSeekKeychainBlocked = true; deepSeekSessionKey = nil
                 }
                 if case QuotaConnectionError.rateLimited = error {
@@ -208,9 +231,11 @@ extension QuotaCredentialStoring {
         if enabled { refreshFeed(force: true) }
     }
     func refreshFeed(force: Bool = false) {
-        let now = Date()
+        let now = clock()
         guard allowsConnections, feedEnabled, feedTask == nil, now >= feedRateLimitedUntil,
               force || now >= feedNextAttempt else { return }
+        // The upstream publishes every ten minutes. Manual refresh obeys the same floor.
+        feedRateLimitedUntil = now.addingTimeInterval(600)
         isFeedRefreshing = true
         let generation = feedGeneration
         feedTask = Task { [weak self] in
@@ -220,7 +245,7 @@ extension QuotaCredentialStoring {
                 let response = try await transport(QuotaReadRequest.resetFeed(etag: feedETag))
                 guard generation == feedGeneration, !Task.isCancelled else { return }
                 if [429, 503].contains(response.status), let delay = response.retryAfter {
-                    feedRateLimitedUntil = Date().addingTimeInterval(delay)
+                    feedRateLimitedUntil = max(feedRateLimitedUntil, clock().addingTimeInterval(delay))
                 }
                 if response.status == 304 {
                     guard feedSnapshot != nil else { throw QuotaConnectionError.invalidData }
@@ -234,15 +259,15 @@ extension QuotaCredentialStoring {
                         hasUnreadFeed = snapshot.events.contains { $0.updatedAt > lastSeen }
                     } else { markFeedRead() } // First sync never marks every historical event as new.
                 }
-                feedRetrievedAt = .now; feedError = nil; feedFailures = 0
-                feedNextAttempt = Date().addingTimeInterval(300)
+                feedRetrievedAt = clock(); feedError = nil; feedFailures = 0
+                feedNextAttempt = clock().addingTimeInterval(600)
             } catch {
                 guard generation == feedGeneration, !Task.isCancelled else { return }
                 // Public feed authorization failures are not requests for the user's API key.
                 if case QuotaConnectionError.authentication = error { feedError = Self.message(QuotaConnectionError.unavailable) }
                 else { feedError = Self.message(error) }
                 feedFailures += 1
-                feedNextAttempt = Date().addingTimeInterval(Self.backoff(feedFailures))
+                feedNextAttempt = clock().addingTimeInterval(Self.backoff(feedFailures, base: 600))
                 if case QuotaConnectionError.rateLimited = error {
                     feedRateLimitedUntil = max(feedRateLimitedUntil, feedNextAttempt)
                 }
@@ -251,7 +276,7 @@ extension QuotaCredentialStoring {
     }
     func markFeedRead() {
         hasUnreadFeed = false
-        defaults.set(Date(), forKey: "quota.reset-feed.seen.v1")
+        defaults.set(clock(), forKey: "quota.reset-feed.seen.v1")
     }
     private static func validateStatus(_ status: Int) throws {
         switch status {

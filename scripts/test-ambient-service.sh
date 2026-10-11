@@ -17,4 +17,9 @@ swiftc -swift-version 6 -parse-as-library -I "$ambient_bin/Modules" \
   "${ambient_objects[@]}" "$ambient_bin"/LunarSwift.build/*.swift.o \
   -lsqlite3 -o "$ambient_output/AmbientConnectedValidation"
 PAUL_PREVIEW_DIRECTORY="$ambient_output" "$ambient_output/AmbientConnectedValidation" "$ambient_output"
+swiftc -swift-version 6 -parse-as-library -I "$ambient_bin/Modules" \
+  Tests/QuotaOverview/DoubaoAmbientLayoutValidation.swift \
+  "${ambient_objects[@]}" "$ambient_bin"/LunarSwift.build/*.swift.o \
+  -lsqlite3 -o "$ambient_output/DoubaoAmbientLayoutValidation"
+PAUL_PREVIEW_DIRECTORY="$ambient_output/doubao" "$ambient_output/DoubaoAmbientLayoutValidation" "$ambient_output"
 print -r -- "Isolated service evidence: $ambient_output"

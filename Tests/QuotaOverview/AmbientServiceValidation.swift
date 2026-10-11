@@ -54,10 +54,13 @@ import Foundation
         check(codex.activity == .running(12) && codex.activity.displayCount == "9+",
               "Only a fresh Codex task source produces a bounded running count")
 
-        let cursor = AmbientQuotaPresentation.make(service: .cursor, account: account(.cursor, value: .percent(81)),
+        var cursorAccount = account(.cursor, value: .percent(81))
+        cursorAccount.pools = [.init(label: "Cursor", value: .percent(81), timing: "28 天后重置"),
+                               .init(label: "其他模型", value: .percent(50), timing: "28 天后重置")]
+        let cursor = AmbientQuotaPresentation.make(service: .cursor, account: cursorAccount,
             resetsAt: now.addingTimeInterval(28 * 86400), tasksAreFresh: true, runningTaskCount: 12, at: now)
-        check(cursor.lines.map(\.value) == [.percent(81)] && cursor.lines.first?.period == "28D",
-              "Cursor's month countdown and primary pool must not inherit Codex's week/short pool")
+        check(cursor.lines.map(\.value) == [.percent(81), .percent(50)] && cursor.lines.first?.period == "内28D",
+              "Cursor's independent monthly pools must not inherit Codex's week/short pool")
         check(cursor.activity == .notAvailable && !cursor.summary.contains("12 个") && !cursor.activity.isWorking,
               "Cursor refresh/foreground does not mean twelve Codex tasks are running in Cursor")
         let grok = AmbientQuotaPresentation.make(service: .grok, account: account(.grok, value: .percent(0)),
@@ -73,6 +76,54 @@ import Foundation
             account: account(.doubao, value: .unlimited, timing: "开始使用后计时"), observedAt: now, at: now)
         check(unstarted.lines.first?.period == "待用" && unstarted.lines.first?.value == .unlimited,
               "An unstarted/unlimited official window is not an invented percentage or reset date")
+        var pairedDoubao = account(.doubao, value: .percent(98), timing: "2 小时 1 分钟后重置")
+        pairedDoubao.pools = [.init(label: "当前时段", value: .percent(98), timing: "2 小时 1 分钟后重置"),
+                              .init(label: "近 7 天", value: .percent(53), timing: "6 天 1 分钟后重置")]
+        let pair = AmbientQuotaPresentation.make(service: .doubao, account: pairedDoubao,
+            observedAt: now.addingTimeInterval(-60), at: now)
+        check(pair.lines.map(\.value) == [.percent(98), .percent(53)] &&
+              pair.lines.map(\.countdownOnly) == ["2H", "6D"],
+              "Doubao must show both independent balances and age each reset from the same observation")
+        check(pair.lines.map(\.poolLabel) == ["5h", "7天"] && pair.liquidValue == .percent(53),
+              "Identify five-hour versus seven-day total; the orb waterline must use the labeled weekly total, never a blend")
+        check(pair.summary.contains("5 小时") && pair.summary.contains("7 天总额") && pair.summary.contains("53%"),
+              "VoiceOver and hover must identify both pools rather than repeat the primary quota")
+        pairedDoubao.pools.reverse()
+        let reversed = AmbientQuotaPresentation.make(service: .doubao, account: pairedDoubao, observedAt: now, at: now)
+        check(reversed.lines.map(\.value) == [.percent(98), .percent(53)],
+              "Provider row order cannot swap the meanings of the two permanent slots")
+        pairedDoubao.pools = [.init(label: "当前时段", value: .percent(98), timing: "1 分钟后重置"),
+                              .init(label: "近 7 天", value: .percent(53), timing: "6 天后重置")]
+        let crossed = AmbientQuotaPresentation.make(service: .doubao, account: pairedDoubao,
+            observedAt: now.addingTimeInterval(-60), at: now)
+        check(crossed.lines.map(\.value) == [.unknown, .percent(53)] && crossed.lines.first?.period == "待刷新",
+              "An expired short window cannot erase a still-valid weekly total or silently roll to 100%")
+        pairedDoubao.pools.removeLast()
+        let missingWeek = AmbientQuotaPresentation.make(service: .doubao, account: pairedDoubao, observedAt: now, at: now)
+        check(missingWeek.lines.map(\.value) == [.percent(98), .unknown] && missingWeek.liquidValue == nil,
+              "A missing weekly quota keeps a visible empty slot and cannot borrow the short-window waterline")
+        pairedDoubao.pools.append(pairedDoubao.pools[0])
+        let duplicate = AmbientQuotaPresentation.make(service: .doubao, account: pairedDoubao, observedAt: now, at: now)
+        check(duplicate.lines.allSatisfy { $0.value == .unknown }, "Duplicate pool identities must not produce arbitrary current values")
+        pairedDoubao.pools = [.init(label: "当前时段", value: .percent(98), timing: "2 小时后重置"),
+                              .init(label: "近 7 天", value: .percent(53), timing: "10月15日 02:02 重置")]
+        let calendarCaption = AmbientQuotaPresentation.make(service: .doubao, account: pairedDoubao, observedAt: now, at: now)
+        check(calendarCaption.lines.last?.resetDescription == "10月15日 02:02 重置" &&
+              calendarCaption.lines.last?.period == "—",
+              "A timezone-less calendar caption retains its official wording without inventing a countdown")
+        check(calendarCaption.lines.last?.resetCalendarCaption == "10/15",
+              "Keep the reported weekly calendar date visible instead of dropping all reset information")
+        pairedDoubao.pools = [.init(label: "近 7 天", value: .percent(98), timing: "2 小时后重置", sourceID: "doubao.short"),
+                              .init(label: "当前时段", value: .percent(53), timing: "1 分钟后重置", sourceID: "doubao.weekly")]
+        let weeklyExpired = AmbientQuotaPresentation.make(service: .doubao, account: pairedDoubao,
+            observedAt: now.addingTimeInterval(-60), at: now)
+        check(weeklyExpired.lines.map(\.value) == [.percent(98), .unknown] && weeklyExpired.liquidValue == nil,
+              "Stable source identity wins over caption; expiring the weekly pool cannot erase the valid short quota or leave old water")
+        for text in ["13月15日 02:02 重置", "2月30日 02:02 重置", "10月15日 24:02 重置", "下周可能重置"] {
+            let invalid = AmbientQuotaLine(id: DoubaoQuotaWindow.weekly.rawValue, period: "—", value: .percent(53),
+                                           resetDescription: text)
+            check(invalid.resetCalendarCaption == nil, "Malformed or speculative dates cannot acquire a precise calendar label")
+        }
         for timing in ["官方未提供重置时间", "明天应该重置", "10月6日 12:00 重置", "999999 天后重置", "-2 小时后重置"] {
             let unknown = AmbientQuotaPresentation.make(service: .doubao,
                 account: account(.doubao, timing: timing), observedAt: now, at: now)

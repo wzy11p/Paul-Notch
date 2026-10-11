@@ -69,6 +69,8 @@ struct WebsiteQuotaSnapshot: Equatable {
     var resetsAt: Date? = nil
     var endsAt: Date? = nil
     var pools: [QuotaOverviewPool] = []
+    /// False for date-only or timezone-less captions, even if legacy display parsing produced a Date.
+    var hasExactResetTime = false
 }
 
 enum WebsiteQuotaParser {
@@ -109,7 +111,7 @@ enum WebsiteQuotaParser {
             details.append(.init(label: "额外余额到期", value: extraTiming))
         }
         return .init(value: value, timing: timing, details: details, observedAt: now,
-                     resetsAt: preciseReset, pools: pools)
+                     resetsAt: preciseReset, pools: pools, hasExactResetTime: preciseReset != nil)
     }
 
     static func doubao(rows: [WebsiteQuotaRow], at now: Date) throws -> WebsiteQuotaSnapshot {
@@ -167,7 +169,8 @@ enum WebsiteQuotaParser {
             return "\(Int(ceil(interval / 86_400))) 天后\(resets == nil ? "套餐结束" : "重置")"
         } ?? "官方未提供重置 / 到期时间"
         return .init(value: .credits(Int(amount), unit: "声贝"), timing: timing,
-                     details: details, observedAt: now, resetsAt: resets, endsAt: expires)
+                     details: details, observedAt: now, resetsAt: resets, endsAt: expires,
+                     hasExactResetTime: resets != nil && reload?.range(of: #"^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$"#, options: .regularExpression) != nil)
     }
     private static func parseDate(_ text: String?) -> Date? {
         guard let text, !text.isEmpty, text.count <= 120 else { return nil }

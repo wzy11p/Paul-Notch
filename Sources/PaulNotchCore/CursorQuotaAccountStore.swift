@@ -18,6 +18,8 @@ import Combine
     @Published private(set) var readingProviders: Set<DesktopQuotaProvider> = []
     var isRefreshing: Bool { !readingProviders.isEmpty }
     let allowsConnections: Bool
+    let modelMonitor: CursorModelMonitor
+    private var modelChanges: AnyCancellable?
     private let defaults: UserDefaults
     private let vault: any QuotaCredentialStoring
     private let transport: @Sendable (URLRequest) async throws -> QuotaHTTPResponse
@@ -38,10 +40,14 @@ import Combine
 
     init(defaults: UserDefaults, vault: any QuotaCredentialStoring, allowsConnections: Bool,
          transport: @escaping @Sendable (URLRequest) async throws -> QuotaHTTPResponse,
+         modelMonitor: CursorModelMonitor? = nil,
          clock: @escaping () -> Date = Date.init) {
         self.defaults = defaults; self.vault = vault; self.transport = transport; self.clock = clock
         self.allowsConnections = allowsConnections
         enabled = allowsConnections && defaults.bool(forKey: Self.enabledKey)
+        self.modelMonitor = modelMonitor ?? CursorModelMonitor(defaults: defaults,
+            allowsInspection: false)
+        modelChanges = self.modelMonitor.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     /// The button explains both products, the destination and secure retention.
@@ -215,12 +221,14 @@ import Combine
     }
     func disconnect() {
         stop(); enabled = false; states = [:]; needsAuthorization = false; keychainBlocked = false; loginError = nil
+        modelMonitor.setEnabled(false)
         guard allowsConnections else { return }
         defaults.set(false, forKey: Self.enabledKey)
         do { try vault.delete() } catch { loginError = "已停止同步；本机登录凭证未能移除，请重试断开。" }
     }
     func stop() {
         cancelLogin(); cancelReads(); credentials = nil; due = [:]; retryUntil = [:]
+        modelMonitor.stop()
     }
     private func cancelReads() {
         generation += 1
@@ -272,7 +280,7 @@ import Combine
             unavailableReason: fresh ? nil : (state?.error ?? (keychainBlocked ? "凭证读取已暂停" : "数据已过期，等待新的官方查询")),
             pools: snapshot.pools.map {
                 .init(label: $0.name == "Cursor Models" ? "Cursor" : $0.name == "Other Models" ? "其他模型" : $0.name,
-                      value: .percent($0.remaining), timing: reset)
+                      value: .percent($0.remaining), timing: reset, sourceID: $0.name)
             })
     }
 }

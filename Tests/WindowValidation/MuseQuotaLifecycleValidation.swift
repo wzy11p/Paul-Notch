@@ -124,7 +124,7 @@ import SwiftUI
         try check(read.details.contains { $0.label == "额外余额（页面显示）" && $0.value == "剩余 2.5 万个词元" },
                   "Extra token display must stay independent and retain the page's rounding")
         let sourceStore = WebsiteQuotaStore(provider: .muse, allowsConnections: true, factory: { _ in browser })
-        sourceStore.beginLogin(); sourceStore.finishLogin(); await settle(sourceStore)
+        sourceStore.beginLogin()
         let sourceHost = NSHostingView(rootView: AnyView(WebsiteQuotaConnectionView(store: sourceStore)))
         sourceHost.sizingOptions = []
         let sourceWindow = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 760, height: 620),
@@ -132,10 +132,13 @@ import SwiftUI
         sourceWindow.isReleasedWhenClosed = false; sourceWindow.alphaValue = 0
         sourceWindow.contentView = sourceHost; sourceWindow.orderBack(nil); sourceHost.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(100))
+        sourceStore.finishLogin(); await settle(sourceStore)
+        try await Task.sleep(for: .milliseconds(100))
         try check(browser.webView.window === sourceWindow && sourceStore.enabled &&
                   !sourceStore.isPresentingLogin && sourceStore.candidateBrowser == nil,
                   "The established Muse setup must show its existing quota browser without starting a replacement login")
-        sourceHost.rootView = AnyView(EmptyView()); sourceWindow.orderOut(nil); sourceWindow.close()
+        // Keep this displayed-source lease for the DOM checks below. Hidden
+        // background documents now deliberately release after a read.
         // Official Muse consumes settings_tab using history.replaceState after
         // opening General. A completed rendered quota is still the same source.
         _ = try await browser.webView.evaluateJavaScript("history.replaceState({}, '', '/'); null;")
@@ -215,6 +218,7 @@ import SwiftUI
             try check(false, "SSO Settings root must reopen General without requesting another login: \(error)")
         }
 
+        sourceHost.rootView = AnyView(EmptyView()); sourceWindow.orderOut(nil); sourceWindow.close()
         var servedUsed = 33
         var requests: [URLRequest] = []
         let hidden = WebsiteQuotaBrowser(provider: .muse, allowsConnections: true, loadImmediately: false,

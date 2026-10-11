@@ -79,6 +79,7 @@ struct CursorQuotaConnectionView: View {
                 Text("登录凭证只保存在本机专用钥匙串；不读取其他应用的密码、Cookie 或聊天。此凭证本身可能具备更广权限，但 Paul 只请求额度，不调用模型、不消费重置卡、不更改账单。")
                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
+            CursorModelFollowControls(monitor: store.modelMonitor).disabled(!store.enabled)
         }
         .font(.system(size: 12))
         .onChange(of: store.loginURL) { if $0 == nil { launcher.cancel(); copiedLink = false } }
@@ -91,5 +92,30 @@ struct CursorQuotaConnectionView: View {
         case .opened: "Chrome 已打开，等待你完成登录和授权"
         case .failed: "浏览器尚未打开，本次连接仍在等待"
         }
+    }
+}
+
+private struct CursorModelFollowControls: View {
+    @ObservedObject var monitor: CursorModelMonitor
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("刘海跟随 Cursor 所选模型", isOn: Binding(get: { monitor.enabled }, set: { monitor.setEnabled($0) }))
+                .toggleStyle(.switch).accessibilityIdentifier("cursor-model-follow-toggle")
+            Text("支持前台 Cursor 桌面，以及 Chrome 当前标签页中的 cursor.com/agents。只检查官网地址和输入框旁的模型选择器，不读取聊天、输入内容、浏览历史或 Cookie，不新增网页或额度请求。显示的是 Paul 已连接账号的额度；Auto 或无法识别时保留双额度，内 = Cursor Models，外 = Other Models。所选模型不等于已提交任务的实际运行模型。")
+                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if monitor.enabled {
+                Text(monitor.selection.explanation).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if monitor.selection == .permissionRequired {
+                    Button("打开辅助功能设置") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }.buttonStyle(.bordered)
+                    Text("只需为 Paul Notch 开启一次；不会要求重新登录 Cursor。开启后切回 Cursor 即可。")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            }
+        }.padding(.top, 12)
     }
 }

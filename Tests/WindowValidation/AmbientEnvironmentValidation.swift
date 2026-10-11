@@ -44,7 +44,7 @@ import SwiftUI
         guard let shelf = app.windows.first(where: { $0 is AmbientPanel }),
               let ambient = shelf.contentView as? NSHostingView<AmbientNotchView>,
               let workspace = app.windows.first(where: { $0 is IslandPanel }),
-              let host = workspace.contentView as? NSHostingView<IslandView> else {
+              let host = (workspace.contentView as? WorkspacePanelContainer)?.workspace as? NSHostingView<IslandView> else {
             throw Failure(description: "Missing real ambient/workspace panels")
         }
         host.rootView.onCloseWorkspace()
