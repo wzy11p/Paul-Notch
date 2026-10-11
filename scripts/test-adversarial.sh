@@ -4,7 +4,7 @@ adversarial_root="${0:A:h:h}"
 cd "$adversarial_root"
 adversarial_output=$(mktemp -d /tmp/paul-adversarial.XXXXXX)
 print -r -- "Regression logs: $adversarial_output"
-for suite in safety clipboard-lifecycle note-ime note-store time-plan time-plan-drafts notes tab-strip workspace-bars presentation-reveal quota-layout ambient-service ambient-foreground-native quota-input-focus quota-keychain credential-migration credential-agent credential-agent-v2 quota-setup quota-drag quota-interactions desktop-quota cursor-account cursor-browser website-quota website-quota-lifecycle website-quota-persistence muse-quota muse-lifecycle persistence-failures workspace-motion workspace-window workspace-geometry; do
+for suite in safety clipboard-lifecycle note-ime note-store time-plan time-plan-drafts notes tab-strip workspace-bars presentation-reveal quota-layout codex-recovery ambient-service cursor-model-context ambient-foreground-native quota-input-focus quota-keychain credential-migration credential-agent credential-agent-v2 custom-quota custom-quota-agent quota-setup quota-self-service quota-card-visibility quota-drag quota-interactions quota-adaptive-layout quota-liquid-orb desktop-quota cursor-account cursor-browser website-quota website-quota-lifecycle website-quota-persistence website-quota-memory muse-quota muse-subscription muse-lifecycle persistence-failures workspace-motion workspace-window workspace-geometry floating-quota; do
   if zsh "scripts/test-$suite.sh" > "$adversarial_output/$suite.log" 2>&1; then
     print -r -- "PASS: $suite"
   else

@@ -38,7 +38,7 @@ struct QuotaOverviewUIValidation {
             pools: [.init(label: "当前时段", value: .percent(55), timing: "3 小时后重置"),
                     .init(label: "近 7 天", value: .percent(81), timing: "6 天后重置")])
         let dualRenderer = ImageRenderer(content: QuotaOverviewAccountCard(account: dual, isPinned: false, onOpen: {})
-            .frame(width: 118, height: 118))
+            .frame(width: 110, height: 110))
         dualRenderer.scale = 3
         if let cg = dualRenderer.cgImage {
             let bitmap = NSBitmapImageRep(cgImage: cg)
@@ -52,10 +52,11 @@ struct QuotaOverviewUIValidation {
                   "The small card must actually render BOTH independent pool percentages, not just carry them in its model")
         } else { check(false, "The dual-pool native card must render") }
         for count in [0, 4, 7, 12, 30] {
-            for width in [600.0, 820.0] {
-                let host = NSHostingView(rootView: QuotaOverviewView(accounts: QuotaOverviewFixtures.accounts(count: count), onClose: {}, mode: .notch))
+            for width in [520.0, 820.0] {
+                let host = NSHostingView(rootView: QuotaOverviewView(accounts: QuotaOverviewFixtures.accounts(count: count), onClose: {}, mode: .notch)
+                    .background(QuotaPanelBackdrop()))
                 host.sizingOptions = []
-                let window = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: width, height: 510),
+                let window = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: width, height: 320),
                                       styleMask: [.borderless], backing: .buffered, defer: false)
                 window.isReleasedWhenClosed = false
                 window.contentView = host
@@ -63,7 +64,7 @@ struct QuotaOverviewUIValidation {
                 window.orderBack(nil)
                 host.layoutSubtreeIfNeeded()
                 RunLoop.main.run(until: Date().addingTimeInterval(0.12))
-                check(window.frame.height == 510 && host.frame.width == width,
+                check(window.frame.height == 320 && host.frame.width == width,
                       "\(count) accounts: contents must not enlarge the native window")
                 guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
                     throw Failure.cannotRender
@@ -77,7 +78,7 @@ struct QuotaOverviewUIValidation {
         // This is geometry/render verification. Mouse/keyboard and AX acceptance use the
         // real preview app: SwiftUI does not publish its full AX tree to this off-screen host.
         for account in QuotaOverviewFixtures.accounts(count: 30) {
-            for width in [118.0, 160.0] {
+            for width in [110.0, 160.0] {
                 let row = QuotaOverviewAccountCard(account: account, isPinned: false, onOpen: {})
                     .frame(width: width, height: width)
                 let renderer = ImageRenderer(content: row)
@@ -87,7 +88,7 @@ struct QuotaOverviewUIValidation {
             }
         }
         guard failures.isEmpty else { exit(1) }
-        print("PASS: 10 native bento renders at 600/820pt with 0/4/7/12/30 accounts; 60 bubble geometry checks")
+        print("PASS: 10 native bento renders at 520/820pt with 0/4/7/12/30 accounts; 60 bubble geometry checks")
         print("Mouse, keyboard and AX interactions require the visible native preview; these are layout checks only")
     }
     private static func opaqueBounds(_ bitmap: NSBitmapImageRep) -> CGRect {

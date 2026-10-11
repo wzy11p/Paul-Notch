@@ -7,6 +7,7 @@ import SwiftUI
         var centerOffset: Double = 0
         var topOffset: Double = 0
         var sizes: [String: [Double]] = [:]
+        var automaticQuotaSize: Bool? = nil
         var isValid: Bool {
             centerOffset.isFinite && topOffset.isFinite && abs(centerOffset) < 100_000 &&
             topOffset >= 0 && topOffset < 100_000 && sizes.count <= 3 &&
@@ -26,55 +27,81 @@ import SwiftUI
            let decoded = try? JSONDecoder().decode(Saved.self, from: data), decoded.isValid {
             saved = decoded
         } else { saved = Saved() }
+        // One owner-requested compact-default transition. Subsequent manual
+        // resizing survives relaunch; connection/tool geometry is untouched.
+        if !defaults.bool(forKey: "quota-compact-default-v2") {
+            saved.sizes.removeValue(forKey: "quota")
+            defaults.set(true, forKey: "quota-compact-default-v2")
+            if let data = try? JSONEncoder().encode(saved) { defaults.set(data, forKey: Self.key) }
+        }
+        // Owner-requested transition from the fixed/clipped default. Only Home
+        // size changes; positions and independent setup/tool sizes are retained.
+        if saved.automaticQuotaSize == nil {
+            saved.automaticQuotaSize = true
+            saved.sizes.removeValue(forKey: "quota")
+            persist()
+        }
     }
 
     func frame(navigation: WorkspaceNavigation, topInset: CGFloat, screen: NSRect) -> NSRect {
         let standard = WorkspacePanelLayout.size(isQuotaHome: navigation.isQuotaHome,
-            isQuotaConnection: navigation.showsQuotaConnections, topInset: topInset, screenWidth: screen.width)
+            isQuotaConnection: navigation.showsQuotaConnections, topInset: topInset, screenWidth: screen.width,
+            screenHeight: screen.height, quotaLayout: navigation.quotaLayout)
         let size = saved.sizes[navigation.layoutKey].map { NSSize(width: $0[0], height: $0[1]) } ?? standard
         let origin = NSPoint(x: screen.midX + saved.centerOffset - size.width / 2,
                              y: screen.maxY - saved.topOffset - size.height)
-        return Self.bounded(NSRect(origin: origin, size: size), on: screen)
+        return Self.bounded(NSRect(origin: origin, size: size), on: screen,
+                            minimumSize: navigation.layoutKey == "quota" ? QuotaHomeLayout.minimumSize : NSSize(width: 480, height: 320))
     }
 
-    func record(_ frame: NSRect, route: String, screen: NSRect) {
+    func record(_ frame: NSRect, route: String, screen: NSRect, manualResize: Bool = true) {
         guard ["quota", "connections", "tools"].contains(route) else { return }
         saved.centerOffset = frame.midX - screen.midX
         saved.topOffset = max(0, screen.maxY - frame.maxY)
-        saved.sizes[route] = [frame.width, frame.height]
+        if route == "quota", manualResize { saved.automaticQuotaSize = false }
+        if route != "quota" || saved.automaticQuotaSize == false {
+            saved.sizes[route] = [frame.width, frame.height]
+        }
+        persist()
+    }
+
+    private func persist() {
         guard saved.isValid, let data = try? JSONEncoder().encode(saved) else { return }
         defaults.set(data, forKey: Self.key)
     }
 
-    func reset() { saved = Saved(); defaults.removeObject(forKey: Self.key) }
+    func reset() { saved = Saved(automaticQuotaSize: true); persist() }
 
-    static func bounded(_ frame: NSRect, on screen: NSRect) -> NSRect {
+    static func bounded(_ frame: NSRect, on screen: NSRect, minimumSize: NSSize = NSSize(width: 480, height: 320)) -> NSRect {
         let availableWidth = max(1, screen.width - 24)
         let availableHeight = max(1, screen.height - 12)
-        let size = NSSize(width: min(availableWidth, max(min(480, availableWidth), frame.width)),
-                          height: min(availableHeight, max(min(360, availableHeight), frame.height)))
+        let size = NSSize(width: min(availableWidth, max(min(minimumSize.width, availableWidth), frame.width)),
+                          height: min(availableHeight, max(min(minimumSize.height, availableHeight), frame.height)))
         return NSRect(x: min(max(screen.minX + 12, frame.minX), screen.maxX - 12 - size.width),
                       y: min(max(screen.minY + 12, frame.maxY - size.height), screen.maxY - size.height),
                       width: size.width, height: size.height)
     }
 
-    static func resized(_ start: NSRect, delta: NSPoint, on screen: NSRect) -> NSRect {
+    static func resized(_ start: NSRect, delta: NSPoint, on screen: NSRect,
+                        minimumSize: NSSize = NSSize(width: 480, height: 320)) -> NSRect {
         let maxWidth = max(1, screen.maxX - 12 - start.minX)
         let maxHeight = max(1, start.maxY - screen.minY - 12)
-        let width = min(maxWidth, max(min(480, maxWidth), start.width + delta.x))
-        let height = min(maxHeight, max(min(360, maxHeight), start.height - delta.y))
+        let width = min(maxWidth, max(min(minimumSize.width, maxWidth), start.width + delta.x))
+        let height = min(maxHeight, max(min(minimumSize.height, maxHeight), start.height - delta.y))
         return NSRect(x: start.minX, y: start.maxY - height, width: width, height: height)
     }
 }
 
 struct WorkspaceWindowGrip: NSViewRepresentable {
     let kind: WorkspaceGripView.Kind
+    var minimumSize = NSSize(width: 480, height: 320)
     var onBegin: () -> Void = {}
     var onCommit: (NSRect, NSScreen) -> Void = { _, _ in }
     var onReset: () -> Void = {}
     func makeNSView(context: Context) -> WorkspaceGripView { WorkspaceGripView(kind: kind) }
     func updateNSView(_ view: WorkspaceGripView, context: Context) {
         view.onBegin = onBegin; view.onCommit = onCommit; view.onReset = onReset
+        view.minimumSize = minimumSize
     }
     static func dismantleNSView(_ view: WorkspaceGripView, coordinator: ()) { view.cancelTracking() }
 }
@@ -83,6 +110,7 @@ struct WorkspaceWindowGrip: NSViewRepresentable {
 @MainActor final class WorkspaceGripView: NSView {
     enum Kind { case move, resize }
     let kind: Kind
+    var minimumSize = NSSize(width: 480, height: 320)
     var onBegin: () -> Void = {}
     var onCommit: (NSRect, NSScreen) -> Void = { _, _ in }
     var onReset: () -> Void = {}
@@ -148,14 +176,17 @@ struct WorkspaceWindowGrip: NSViewRepresentable {
         guard let window, event.window === window, let startFrame, let startPointer, let screen else { return }
         let pointer = window.convertPoint(toScreen: event.locationInWindow)
         let delta = NSPoint(x: pointer.x - startPointer.x, y: pointer.y - startPointer.y)
+        let targetScreen = kind == .move ? NSScreen.screens.first { $0.frame.contains(pointer) } ?? screen : screen
+        self.screen = targetScreen
         let target = kind == .move
-            ? WorkspacePanelGeometry.bounded(startFrame.offsetBy(dx: delta.x, dy: delta.y), on: screen.frame)
-            : WorkspacePanelGeometry.resized(startFrame, delta: delta, on: screen.frame)
+            ? WorkspacePanelGeometry.bounded(startFrame.offsetBy(dx: delta.x, dy: delta.y), on: targetScreen.frame, minimumSize: minimumSize)
+            : WorkspacePanelGeometry.resized(startFrame, delta: delta, on: screen.frame, minimumSize: minimumSize)
         window.setFrame(target, display: true)
     }
     override func mouseUp(with event: NSEvent) {
-        guard startFrame != nil, let window, let screen else { return }
+        guard startFrame != nil, let window else { return }
         mouseDragged(with: event)
+        guard let screen else { cancelTracking(); return }
         startFrame = nil; startPointer = nil; self.screen = nil
         onCommit(window.frame, screen)
     }
@@ -168,8 +199,8 @@ struct WorkspaceWindowGrip: NSViewRepresentable {
                             y: event.keyCode == 125 ? -10 : event.keyCode == 126 ? 10 : 0)
         onBegin()
         let target = kind == .move
-            ? WorkspacePanelGeometry.bounded(window.frame.offsetBy(dx: delta.x, dy: delta.y), on: screen.frame)
-            : WorkspacePanelGeometry.resized(window.frame, delta: delta, on: screen.frame)
+            ? WorkspacePanelGeometry.bounded(window.frame.offsetBy(dx: delta.x, dy: delta.y), on: screen.frame, minimumSize: minimumSize)
+            : WorkspacePanelGeometry.resized(window.frame, delta: delta, on: screen.frame, minimumSize: minimumSize)
         window.setFrame(target, display: true); onCommit(window.frame, screen)
     }
     func cancelTracking() {

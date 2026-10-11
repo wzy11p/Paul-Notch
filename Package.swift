@@ -8,6 +8,7 @@ let package = Package(
         .executable(name: "PaulNotch", targets: ["PaulNotchApp"]),
         .executable(name: "PaulCredentialAgent", targets: ["PaulCredentialAgent"]),
         .executable(name: "PaulCredentialAgentV2", targets: ["PaulCredentialAgentV2"]),
+        .executable(name: "PaulCustomQuotaAgentV1", targets: ["PaulCustomQuotaAgentV1"]),
     ],
     dependencies: [
         .package(url: "https://github.com/6tail/lunar-swift.git", exact: "1.1.8"),
@@ -15,6 +16,7 @@ let package = Package(
     targets: [
         .executableTarget(name: "PaulCredentialAgent", path: "Sources/PaulCredentialAgent"),
         .executableTarget(name: "PaulCredentialAgentV2", path: "Sources/PaulCredentialAgentV2"),
+        .executableTarget(name: "PaulCustomQuotaAgentV1", path: "Sources/PaulCustomQuotaAgentV1"),
         .target(
             name: "PaulNotchCore",
             dependencies: [

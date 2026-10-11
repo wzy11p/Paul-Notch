@@ -89,7 +89,7 @@ private struct WebsiteQuotaLoginContent: View {
                         .accessibilityIdentifier("quota-website-return-\(browser.provider.accountID)")
                 }
             }
-            WebsiteQuotaWebContainer(webView: browser.displayedWebView)
+            WebsiteQuotaWebContainer(browser: browser, webView: browser.displayedWebView)
                 .id(ObjectIdentifier(browser.displayedWebView))
                 .frame(minHeight: 100, maxHeight: .infinity)
         }
@@ -115,7 +115,19 @@ private struct QuotaConnectionIssue: View {
     }
 }
 private struct WebsiteQuotaWebContainer: NSViewRepresentable {
+    let browser: WebsiteQuotaBrowser
     let webView: WKWebView
-    func makeNSView(context: Context) -> WKWebView { webView }
+    final class Coordinator {
+        weak var browser: WebsiteQuotaBrowser?
+        init(_ browser: WebsiteQuotaBrowser) { self.browser = browser }
+    }
+    func makeCoordinator() -> Coordinator { Coordinator(browser) }
+    func makeNSView(context: Context) -> WKWebView {
+        browser.setDocumentVisible(webView, visible: true)
+        return webView
+    }
     func updateNSView(_ nsView: WKWebView, context: Context) {}
+    static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+        coordinator.browser?.setDocumentVisible(nsView, visible: false)
+    }
 }

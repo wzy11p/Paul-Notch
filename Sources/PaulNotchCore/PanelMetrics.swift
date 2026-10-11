@@ -4,6 +4,7 @@ import SwiftUI
 @MainActor
 final class PanelMetrics: ObservableObject {
     @Published var topInset: CGFloat = 41
+    @Published var isFloating = false
     @Published private(set) var collapseRequest = 0
 
     func panelWillHide() {

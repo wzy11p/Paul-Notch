@@ -5,6 +5,7 @@ import SwiftUI
 final class AmbientNotchPresentation: ObservableObject {
     @Published var isFrontmostAppFullScreen = false
     @Published var centerGapWidth: CGFloat = 96
+    @Published var isFloating = false
     @Published private(set) var service: AmbientQuotaService = .codex
     private var selection = AmbientServiceSelection()
 
@@ -24,14 +25,79 @@ struct AmbientNotchView: View {
     @ObservedObject var connections: QuotaConnectionsStore
     @ObservedObject var presentation: AmbientNotchPresentation
     let onOpen: () -> Void
+    var onMove: (NSRect, NSScreen) -> Void = { _, _ in }
+    var onDock: () -> Void = {}
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
     @State private var companionPointer: CGPoint = .zero
     @State private var companionPressed = false
     @State private var releaseTask: Task<Void, Never>?
+    @State private var orbMotion = QuotaOrbMotionRelay()
 
     var body: some View {
+        if presentation.isFloating { floatingBubble } else { shelf }
+    }
+
+    private var floatingBubble: some View {
+        TimelineView(.periodic(from: .now, by: 5)) { context in
+            let state = quotaPresentation(at: context.date)
+            ZStack {
+                QuotaLiquidOrb(value: state.liquidValue, reduceMotion: reduceMotion, motion: orbMotion)
+                    .frame(width: 78, height: 78)
+                if state.service == .doubao {
+                    DoubaoAmbientQuotaView(lines: state.lines, placement: .orb)
+                } else {
+                VStack(spacing: 0) {
+                    HStack(spacing: 5) {
+                        AmbientProviderMark(service: state.service, size: 16, attentive: false,
+                            pressed: false, quiet: true, working: false, pointer: .zero)
+                        if let line = state.lines.first {
+                            Text(line.countdownOnly).font(.system(size: 9, weight: .medium)).foregroundStyle(.white.opacity(0.86))
+                        }
+                    }.frame(height: 20)
+                    if state.service == .cursor, state.lines.count > 1 {
+                        VStack(spacing: 0) {
+                            ForEach(state.lines) { line in
+                                Text("\(line.poolLabel ?? "") \(line.value.text)")
+                                    .font(.system(size: 12, weight: .semibold)).monospacedDigit()
+                            }
+                        }.foregroundStyle(QuotaOverviewPalette.primary).frame(height: 30)
+                    } else {
+                        Text(state.lines.first?.value.text ?? "—")
+                            .font(.system(size: 18, weight: .semibold)).monospacedDigit()
+                            .foregroundStyle(QuotaOverviewPalette.primary)
+                            .lineLimit(1).minimumScaleFactor(0.7)
+                            .frame(height: 30)
+                    }
+                    if let model = state.cursorModel {
+                        Text(model.shortLabel).font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.86)).lineLimit(1)
+                            .frame(height: 12)
+                    } else {
+                        Color.clear.frame(height: 12).accessibilityHidden(true)
+                    }
+                }.frame(width: 62, height: 62).offset(y: -1)
+                }
+                if case .running(let count) = state.activity {
+                    Text(count > 9 ? "9+" : "\(count)")
+                        .font(.system(size: 9, weight: .semibold)).monospacedDigit()
+                        .padding(.horizontal, 3).padding(.vertical, 2)
+                        .background(Color(white: 0.16), in: Circle())
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .padding(.top, 6).padding(.trailing, 17)
+                }
+            }
+            .frame(width: 78, height: 78).clipShape(Circle()).padding(7)
+            .overlay {
+                FloatingQuotaInput(summary: state.summary, onOpen: onOpen, onMove: onMove, onDock: onDock,
+                                   motion: orbMotion)
+            }
+            .preferredColorScheme(.dark)
+        }
+    }
+
+    private var shelf: some View {
         TimelineView(.periodic(from: .now, by: 5)) { context in
             let state = quotaPresentation(at: context.date)
             ZStack {
@@ -90,7 +156,10 @@ struct AmbientNotchView: View {
 
     @ViewBuilder
     private func quotaStrip(_ state: AmbientQuotaPresentation) -> some View {
-        if state.lines.isEmpty {
+        if state.service == .doubao {
+            DoubaoAmbientQuotaView(lines: state.lines, placement: .notchValues,
+                                  isFullScreen: presentation.isFrontmostAppFullScreen)
+        } else if state.lines.isEmpty {
             HStack(spacing: 5) {
                 Image(systemName: "gauge.with.dots.needle.33percent")
                     .font(.system(size: compactFontSize, weight: .medium))
@@ -140,7 +209,26 @@ struct AmbientNotchView: View {
     }
 
     private func activityStatus(_ state: AmbientQuotaPresentation) -> some View {
-        HStack(spacing: presentation.isFrontmostAppFullScreen ? 5 : 7) {
+        if state.service == .doubao {
+            return AnyView(HStack(spacing: 2) {
+                AmbientProviderMark(service: state.service, size: presentation.isFrontmostAppFullScreen ? 10 : 12,
+                    attentive: isHovered, pressed: companionPressed, quiet: true, working: false, pointer: companionPointer)
+                    .frame(width: presentation.isFrontmostAppFullScreen ? 10 : 12)
+                DoubaoAmbientQuotaView(lines: state.lines, placement: .notchResets,
+                                      isFullScreen: presentation.isFrontmostAppFullScreen)
+            })
+        }
+        if let model = state.cursorModel {
+            return AnyView(VStack(spacing: 1) {
+                AmbientProviderMark(service: state.service, size: logoSize, attentive: isHovered,
+                    pressed: companionPressed, quiet: true, working: false, pointer: companionPointer)
+                    .frame(width: logoSize, height: logoSize)
+                Text(model.shortLabel)
+                    .font(.system(size: presentation.isFrontmostAppFullScreen ? 7 : 8, weight: .medium))
+                    .foregroundStyle(IslandTheme.text2).lineLimit(1).minimumScaleFactor(0.85)
+            })
+        }
+        return AnyView(HStack(spacing: presentation.isFrontmostAppFullScreen ? 5 : 7) {
             AmbientProviderMark(service: state.service, size: logoSize, attentive: isHovered,
                 pressed: companionPressed, quiet: reduceMotion || presentation.isFrontmostAppFullScreen,
                 working: state.activity.isWorking, pointer: companionPointer)
@@ -152,7 +240,7 @@ struct AmbientNotchView: View {
                     .monospacedDigit()
                     .foregroundStyle(state.activity.isWorking ? IslandTheme.text1 : IslandTheme.text2)
             }
-        }
+        })
     }
 
     func quotaPresentation(at now: Date) -> AmbientQuotaPresentation {

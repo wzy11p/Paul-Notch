@@ -98,6 +98,21 @@ actor IslandCodexAppServerClient {
             let response = try await send(method: "account/rateLimits/read", params: nil)
             return try CodexStatusDecoder.decodeQuota(response)
         } catch {
+            if let clientError = error as? IslandCodexClientError, case .rpc = clientError {
+                // A long-lived reader can retain an obsolete account session.
+                // Recreate only our read-only child and retry once; Codex owns
+                // authentication. Never retry indefinitely or reset its login.
+                stop()
+                try Task.checkCancellation()
+                do {
+                    try await ensureStarted()
+                    let response = try await send(method: "account/rateLimits/read", params: nil)
+                    return try CodexStatusDecoder.decodeQuota(response)
+                } catch {
+                    stop()
+                    throw error
+                }
+            }
             if shouldRestart(after: error) { stop() }
             throw error
         }

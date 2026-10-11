@@ -9,8 +9,10 @@ quota_sources=(Sources/PaulNotchCore/QuotaConnectionModels.swift Sources/PaulNot
   Sources/PaulNotchCore/QuotaHTTPClient.swift Sources/PaulNotchCore/QuotaOverviewPresentation.swift
   Sources/PaulNotchCore/DesktopQuotaModels.swift Sources/PaulNotchCore/DesktopQuotaStore.swift
   Sources/PaulNotchCore/CursorQuotaModels.swift Sources/PaulNotchCore/CursorQuotaAccountStore.swift
+  Sources/PaulNotchCore/CursorModelContext.swift Sources/PaulNotchCore/CursorModelMonitor.swift
+  Sources/PaulNotchCore/CursorWebContext.swift
   Sources/PaulNotchCore/WebsiteQuotaModels.swift Sources/PaulNotchCore/WebsiteQuotaStore.swift Sources/PaulNotchCore/WebsiteQuotaBrowser.swift Sources/PaulNotchCore/MuseQuotaCapture.swift Sources/PaulNotchCore/MuseBackgroundLayout.swift
-  Sources/PaulNotchCore/QuotaInteractiveWebView.swift)
+  Sources/PaulNotchCore/QuotaInteractiveWebView.swift Sources/PaulNotchCore/MuseSubscriptionReader.swift Sources/PaulNotchCore/MuseSubscriptionScript.swift)
 swiftc -swift-version 6 -parse-as-library $quota_sources Sources/PaulNotchCore/QuotaCredentialVault.swift Sources/PaulNotchCore/QuotaCredentialAgentClient.swift \
   Tests/QuotaOverview/QuotaKeychainPromptValidation.swift -o "$quota_output/prompt-policy"
 swiftc -swift-version 6 -parse-as-library $quota_sources \

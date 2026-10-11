@@ -137,42 +137,48 @@ struct QuotaProviderHelpView: View {
 
 struct QuotaResetFeedView: View {
     @ObservedObject var connections: QuotaConnectionsStore
+    @AppStorage(QuotaNoticeTime.reminderEnabledKey, store: AppEnvironment.defaults) private var remindersEnabled = true
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("重置公告").font(.headline)
+                Text("重置公告").font(.system(size: 15, weight: .semibold))
                 Spacer()
                 if connections.feedEnabled {
                     Button("刷新") { connections.refreshFeed(force: true) }.disabled(connections.isFeedRefreshing)
                 }
             }
-            Text("来源 AIHOT · 公共消息，不是你的个人额度。预告不等于已重置；不显示模型推算日期，不自动使用重置卡。")
-                .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text("账户与公告分开；公共消息不等于个人到账。")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            HStack {
+                Toggle("醒目提醒", isOn: $remindersEnabled).toggleStyle(.switch).controlSize(.small)
+                Spacer()
+                Button("试发一条") { NotificationCenter.default.post(name: QuotaNoticeTime.testRequested, object: nil) }
+                    .disabled(!connections.allowsConnections)
+            }.font(.system(size: 12))
             if !connections.feedEnabled {
-                Text("开启后每 5 分钟匿名读取 aihot.news，不发送账户或 Key。新消息会在此处标记；本版不发送系统通知。")
+                Text("开启后每 10 分钟匿名读取 AIHOT 公开接口；不调用模型、不消耗你的模型 Token，也不发送账户或 Key。电脑休眠、离线或上游延迟时，不能保证即时获知。")
                     .font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
                 Button("开启重置公告") { connections.setFeedEnabled(true) }
-                    .buttonStyle(.borderedProminent).controlSize(.large).disabled(!connections.allowsConnections)
+                    .buttonStyle(.borderedProminent).disabled(!connections.allowsConnections)
+                Spacer(minLength: 0)
             } else {
-                if let error = connections.feedError {
-                    Text(verbatim: error).font(.system(size: 12)).foregroundStyle(.orange)
-                }
                 if let snapshot = connections.feedSnapshot {
-                    Text("来源核验：\(snapshot.checkedAt.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                    if snapshot.monitorStatus != "healthy" || Date().timeIntervalSince(snapshot.checkedAt) > 1800 {
-                        Text("上游核验可能延迟，以下消息请结合原帖确认。").font(.system(size: 12)).foregroundStyle(.orange)
-                    }
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 16) {
+                        LazyVStack(alignment: .leading, spacing: 12) {
                             if snapshot.events.isEmpty { Text("暂时没有重置消息") }
                             ForEach(snapshot.events, id: \.id) { event in
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text("\(event.typeLabel) · \(event.statusLabel)").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
                                     Text(verbatim: event.title).font(.system(size: 13, weight: .semibold))
-                                    Text(verbatim: event.text).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                                    Text(verbatim: event.timingLabel).font(.system(size: 12, weight: .medium)).fixedSize(horizontal: false, vertical: true)
+                                    if let reset = event.announcedResetAt, reset > Date() {
+                                        Text(QuotaNoticeTime.remaining(until: reset, now: Date())).font(.system(size: 15, weight: .semibold))
+                                    }
+                                    DisclosureGroup("原帖摘要") {
+                                        Text(verbatim: event.text).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                                    }.font(.system(size: 11))
                                     HStack {
-                                        Text(event.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                                        Text("消息更新 · \(QuotaNoticeTime.beijing(event.updatedAt))")
                                         Spacer()
                                         if let source = event.sourceURL { Link("查看原帖", destination: source) }
                                     }.font(.system(size: 11)).foregroundStyle(.secondary)
@@ -180,14 +186,36 @@ struct QuotaResetFeedView: View {
                                 Divider()
                             }
                         }
-                    // A popover's intrinsic-size proposal otherwise collapses the lazy scroll viewport.
-                    }.frame(height: 260)
-                } else if connections.isFeedRefreshing { Text("正在读取公开消息…").font(.system(size: 12)) }
-                Button("停止读取公告") { connections.setFeedEnabled(false) }.buttonStyle(.bordered)
+                    }.frame(minHeight: 80, maxHeight: .infinity)
+                } else {
+                    Text(connections.isFeedRefreshing ? "正在读取公开消息…" : "暂未收到公告，稍后可刷新。")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }
+                DisclosureGroup("来源与更新状态") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("已知账户时间：提前 24 小时与 1 小时提醒（短周期仅提前 1 小时）。新公告：检测到即弹出提示卡，直到确认或稍后提醒。")
+                        Text("提醒不会抢走输入焦点；投屏隐身、锁屏和休眠时暂缓，恢复后核对最新数据。余额或时间尚未读到时，不伪造提醒。")
+                        Text("来源：AIHOT 公开 JSON → Tibo 原帖。每 10 分钟读取近期消息，无模型调用，不消耗你的 Token。不是官方推送，不保证发布瞬间就能收到。")
+                        Text("所有日期显式换算为北京时间（UTC+8）。只有原帖明确且未被推算的精确预告才显示公告倒计时；预计、时段和社区回执不当作确定时刻。不自动使用重置卡。")
+                        if let snapshot = connections.feedSnapshot {
+                            Text("来源核验：\(snapshot.checkedAt.map(QuotaNoticeTime.beijing) ?? "尚无核验时间")")
+                            if snapshot.monitorStatus != "healthy" || snapshot.checkedAt.map({ Date().timeIntervalSince($0) > 1800 }) != false {
+                                Text("上游核验可能延迟，请结合原帖确认。")
+                            }
+                        }
+                        if let error = connections.feedError { Text(verbatim: error) }
+                        Button("停止读取公告") { connections.setFeedEnabled(false) }
+                    }.font(.system(size: 10)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }.font(.system(size: 11))
             }
         }
-        .padding(18).frame(width: 360).background(Color(white: 0.10))
+        .padding(12).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(QuotaOverviewPalette.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .environment(\.colorScheme, .dark)
         .onAppear { if connections.feedSnapshot != nil { connections.markFeedRead() } }
+        .onChange(of: remindersEnabled) { _ in NotificationCenter.default.post(name: QuotaNoticeTime.settingsChanged, object: nil) }
     }
 }
 
@@ -220,7 +248,8 @@ extension QuotaConnectionsStore {
     }
     var feedLabel: String {
         if !feedEnabled { return "重置公告 · 未开启" }
-        if feedError != nil { return "重置公告 · 更新失败" }
+        // Transient feed failures belong in its detail page, not the primary quota surface.
+        if feedError != nil { return "重置公告" }
         if hasUnreadFeed { return "重置公告 · 有新消息" }
         return feedSnapshot == nil ? "重置公告 · 正在读取" : "重置公告"
     }

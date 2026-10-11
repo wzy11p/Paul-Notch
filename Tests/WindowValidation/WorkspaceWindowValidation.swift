@@ -23,7 +23,7 @@ import SwiftUI
         }
         settle(0.4)
         guard let window = app.windows.first(where: { $0 is IslandPanel }),
-              let host = window.contentView as? NSHostingView<IslandView>,
+              let host = (window.contentView as? WorkspacePanelContainer)?.workspace as? NSHostingView<IslandView>,
               let shelf = app.windows.first(where: { $0 is AmbientPanel }),
               let ambient = shelf.contentView as? NSHostingView<AmbientNotchView>,
               let motion = Mirror(reflecting: delegate).children.first(where: { $0.label == "workspaceMotion" })?.value as? WorkspacePanelMotion else {

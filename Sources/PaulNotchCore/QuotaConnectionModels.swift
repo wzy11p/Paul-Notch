@@ -65,7 +65,7 @@ enum QuotaReadRequest {
         return request
     }
     static func resetFeed(etag: String?) -> URLRequest {
-        var request = base("https://aihot.news/api/v1/codex-resets")
+        var request = base("https://aihot.news/api/v1/codex-resets/recent")
         if let etag, etag.utf8.count <= 512, !etag.contains("\r"), !etag.contains("\n") {
             request.setValue(etag, forHTTPHeaderField: "If-None-Match")
         }
@@ -81,37 +81,79 @@ enum QuotaReadRequest {
 }
 
 struct QuotaResetFeed: Sendable {
+    struct Schedule: Sendable {
+        let precision: String
+        let from, through: Date
+    }
     struct Event: Sendable {
         let id, type, status, title, text: String
         let confirmationBasis: String?
         let updatedAt: Date
         let sourceURL: URL?
+        var schedule: Schedule? = nil
+        var scopeKnown = false
+        var kindExplicit = false
+        var timeInferred = true
+        var audience: String? = nil
+        var products: String? = nil
+        var isOriginalSource: Bool {
+            sourceURL?.path.range(of: #"^/thsottiaux/status/[0-9]+$"#, options: .regularExpression) != nil
+        }
+        /// Even an explicit public schedule is a plan, never a personal reset receipt.
+        var announcedResetAt: Date? {
+            guard status == "announced", isOriginalSource, scopeKnown, kindExplicit, !timeInferred,
+                  type == "direct_reset", let schedule, schedule.precision == "exact",
+                  schedule.from == schedule.through else { return nil }
+            return schedule.from
+        }
+        var timingLabel: String {
+            if status == "confirmed" { return "已有完成消息；不等于你的账户已到账" }
+            if let announcedResetAt { return "公告预定 · \(QuotaNoticeTime.beijing(announcedResetAt))" }
+            if let schedule, ["deadline", "date", "window", "approximate"].contains(schedule.precision) {
+                let qualifier = timeInferred ? "上游推算，非确定时刻" : "公告给出的范围，非精确时刻"
+                if schedule.precision == "deadline" { return "\(qualifier) · \(QuotaNoticeTime.beijing(schedule.through)) 前" }
+                return "\(qualifier) · \(QuotaNoticeTime.beijing(schedule.from)) 至 \(QuotaNoticeTime.beijing(schedule.through))"
+            }
+            return "重置时刻未确认，不生成精确倒计时"
+        }
         var typeLabel: String { type == "direct_reset" ? "额度重置" : type == "reset_credit" ? "重置卡" : "重置消息" }
         var statusLabel: String {
             if status == "announced" { return "预告 · 时间未确认" }
             if status == "confirmed" { return confirmationBasis == "receipt_review" ? "社区回执核验" : "已有确认消息" }
+            if status == "in_progress" { return "正在发放 · 到账时间未确认" }
+            if status == "expired_unconfirmed" { return "预告已过期 · 未获确认" }
+            if status == "likely_completed" { return "可能已完成 · 未获确认" }
             return "状态待核对"
         }
     }
     let events: [Event]
-    let checkedAt: Date
+    let checkedAt: Date?
     let monitorStatus: String
+    var collectedAt: Date? = nil
     static func decode(_ data: Data) throws -> Self {
         struct Payload: Decodable {
-            struct Monitor: Decodable { let status: String }
+            struct Monitor: Decodable { let status: String; let lastCollectedAt: String? }
             struct Item: Decodable {
                 struct Post: Decodable { let text: String?; let originalText: String?; let url: String? }
+                struct Timing: Decodable { let precision, from, through: String }
+                struct Presentation: Decodable {
+                    let status: String?
+                    let scopeKnown, kindExplicit, timeInferred: Bool?
+                    let audienceZh, productsZh: String?
+                }
                 let id, type, status, title, updatedAt: String
                 let confirmationBasis: String?
                 let posts: [Post]
+                let schedule: Timing?
+                let presentation: Presentation?
             }
             let schemaVersion: Int
-            let checkedAt: String
-            let monitor: Monitor
+            let checkedAt: String?
+            let monitor: Monitor?
             let events: [Item]
         }
         guard let payload = try? JSONDecoder().decode(Payload.self, from: data), payload.schemaVersion == 1,
-              payload.events.count <= 1000, let checkedAt = date(payload.checkedAt),
+              payload.events.count <= 1000,
               Set(payload.events.map(\.id)).count == payload.events.count else { throw QuotaConnectionError.invalidData }
         let events = try payload.events.map { item -> Event in
             guard !item.id.isEmpty, item.id.count <= 256, let updatedAt = date(item.updatedAt) else {
@@ -123,17 +165,48 @@ struct QuotaResetFeed: Sendable {
                       url.user == nil, url.password == nil, url.port == nil else { return nil }
                 return url
             }
-            return Event(id: item.id, type: item.type, status: item.status, title: String(item.title.prefix(300)),
+            let schedule = item.schedule.flatMap { timing -> Schedule? in
+                guard let from = date(timing.from), let through = date(timing.through), from <= through else { return nil }
+                return Schedule(precision: timing.precision, from: from, through: through)
+            }
+            return Event(id: item.id, type: item.type, status: item.presentation?.status ?? item.status, title: String(item.title.prefix(300)),
                          text: String((item.posts.first?.text ?? item.posts.first?.originalText ?? "暂无原帖摘要").prefix(3000)),
-                         confirmationBasis: item.confirmationBasis, updatedAt: updatedAt, sourceURL: safeSource)
+                         confirmationBasis: item.confirmationBasis, updatedAt: updatedAt, sourceURL: safeSource,
+                         schedule: schedule, scopeKnown: item.presentation?.scopeKnown == true,
+                         kindExplicit: item.presentation?.kindExplicit == true,
+                         timeInferred: item.presentation?.timeInferred != false,
+                         audience: item.presentation?.audienceZh.map { String($0.prefix(100)) },
+                         products: item.presentation?.productsZh.map { String($0.prefix(100)) })
         }.sorted { $0.updatedAt > $1.updatedAt }
         // Deliberately ignore `estimate`: upstream can publish model-inferred dates.
         // A public forecast is never an account reset timestamp or a balance update.
-        return Self(events: events, checkedAt: checkedAt, monitorStatus: payload.monitor.status)
+        return Self(events: events, checkedAt: payload.checkedAt.flatMap(date), monitorStatus: payload.monitor?.status ?? "unknown",
+                    collectedAt: payload.monitor?.lastCollectedAt.flatMap(date))
     }
     private static func date(_ text: String) -> Date? {
+        guard text.range(of: #"^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$"#, options: .regularExpression) != nil else { return nil }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.date(from: text) ?? ISO8601DateFormatter().date(from: text)
     }
+}
+
+enum QuotaNoticeTime {
+    static func beijing(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        formatter.dateFormat = "yyyy年M月d日 HH:mm"
+        return "北京时间 \(formatter.string(from: date))"
+    }
+    static func remaining(until date: Date, now: Date) -> String {
+        let minutes = max(0, Int(ceil(date.timeIntervalSince(now) / 60)))
+        if minutes == 0 { return "已到预定时间，等待核对" }
+        let hours = minutes / 60
+        return hours > 0 ? "还有 \(hours) 小时 \(minutes % 60) 分钟" : "还有 \(minutes) 分钟"
+    }
+    static let settingsChanged = Notification.Name("PaulQuotaResetReminderSettingsChanged")
+    static let testRequested = Notification.Name("PaulQuotaResetReminderTestRequested")
+    static let reminderEnabledKey = "quota.reset-reminders.enabled.v1"
 }

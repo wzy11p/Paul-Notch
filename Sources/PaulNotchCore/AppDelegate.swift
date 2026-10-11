@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import QuartzCore
 import Carbon.HIToolbox
+import Combine
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -34,35 +35,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             transport: QuotaHTTPClient.fetch),
         cursorAccount: CursorQuotaAccountStore(defaults: AppEnvironment.defaults,
             vault: QuotaCredentialVault(service: .cursorAccount), allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
-            transport: CursorQuotaHTTPClient.fetch),
+            transport: CursorQuotaHTTPClient.fetch,
+            modelMonitor: CursorModelMonitor(defaults: AppEnvironment.defaults, allowsInspection: AppEnvironment.ownedQuotaConnectionsEnabled)),
         websiteMemberships: [
             "muse": WebsiteQuotaStore(provider: .muse, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
                 factory: { WebsiteQuotaBrowser(provider: $0, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled) },
                 defaults: AppEnvironment.ownedWebsiteDefaults,
                 persistentFactory: { WebsiteQuotaBrowser(provider: $0, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
-                    profileIdentifier: $1) },
+                    loadImmediately: false, profileIdentifier: $1) },
                 removeProfile: WebsiteQuotaBrowser.removeOwnedProfile),
             "doubao": WebsiteQuotaStore(provider: .doubao, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
                 factory: { WebsiteQuotaBrowser(provider: $0, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled) },
                 defaults: AppEnvironment.ownedWebsiteDefaults,
                 persistentFactory: { WebsiteQuotaBrowser(provider: $0, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
-                    profileIdentifier: $1) },
+                    loadImmediately: false, profileIdentifier: $1) },
                 removeProfile: WebsiteQuotaBrowser.removeOwnedProfile),
             "minimax-audio": WebsiteQuotaStore(provider: .miniMaxCN, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
                 factory: { WebsiteQuotaBrowser(provider: $0, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled) },
                 defaults: AppEnvironment.ownedWebsiteDefaults,
                 persistentFactory: { WebsiteQuotaBrowser(provider: $0, allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled,
-                    profileIdentifier: $1) },
-                removeProfile: WebsiteQuotaBrowser.removeOwnedProfile)])
+                    loadImmediately: false, profileIdentifier: $1) },
+                removeProfile: WebsiteQuotaBrowser.removeOwnedProfile)],
+        customAPIs: CustomQuotaConnectionsStore(registry: CustomQuotaDefaultsRegistry(defaults: AppEnvironment.defaults),
+            allowsConnections: AppEnvironment.ownedQuotaConnectionsEnabled, vault: { CustomQuotaCredentialVault(id: $0) },
+            transport: CustomQuotaHTTPClient.fetch))
     private let aiApplicationDetector = AIApplicationDetector()
     private let appSettings = AppSettingsStore()
     private let panelMetrics = PanelMetrics()
     private let workspaceNavigation = WorkspaceNavigation()
     private let workspaceGeometry = WorkspacePanelGeometry(defaults: AppEnvironment.defaults)
+    private let floatingPlacement = QuotaFloatingPlacement(defaults: AppEnvironment.defaults)
     private let ambientPresentation = AmbientNotchPresentation()
     private lazy var reminderScheduler = TaskReminderScheduler { [weak self] in
         self?.store.tasks ?? []
     }
+    private lazy var quotaResetReminders = QuotaResetReminderController(defaults: AppEnvironment.defaults) { [weak self] now in
+        guard let self else { return ([], nil) }
+        return QuotaResetReminderSource.inputs(codex: codexStatusStore, connections: quotaConnections, now: now)
+    }
+    private var quotaReminderChanges: Set<AnyCancellable> = []
     private var panel: IslandPanel!
     private var ambientPanel: AmbientPanel!
     private var drawerView: NSView!
@@ -101,6 +112,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clipboardStore.startMonitoring()
         setupPanels()
         quotaConnections.start()
+        if AppEnvironment.ownedQuotaConnectionsEnabled {
+            quotaResetReminders.isSuppressed = presentationModeEnabled
+            quotaResetReminders.start()
+            quotaConnections.onRefreshTick = { [weak self] in self?.quotaResetReminders.requestUpdate() }
+            codexStatusStore.objectWillChange.sink { [weak self] _ in self?.quotaResetReminders.requestUpdate() }.store(in: &quotaReminderChanges)
+            quotaConnections.objectWillChange.sink { [weak self] _ in self?.quotaResetReminders.requestUpdate() }.store(in: &quotaReminderChanges)
+        }
         workspaceNavigation.onLayoutChange = { [weak self] in self?.resizeWorkspaceForCurrentPage() }
         showAmbientPanel(on: preferredAmbientScreen())
         setupMenuBar()
@@ -180,6 +198,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         notifyServer.stop()
         codexStatusStore.stop()
         quotaConnections.stop()
+        if AppEnvironment.ownedQuotaConnectionsEnabled { quotaResetReminders.stop() }
+        quotaReminderChanges.removeAll()
         globalHotKey?.invalidate()
         if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
@@ -230,11 +250,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onGeometryCommit: { [weak self] frame, screen in
                 guard let self else { return }
                 self.workspaceGeometry.record(frame, route: self.workspaceNavigation.layoutKey, screen: screen.frame)
+                if self.floatingPlacement.isFloating {
+                    self.floatingPlacement.detach(at: NSPoint(x: frame.midX, y: frame.maxY - 46), on: screen)
+                }
             },
             onGeometryReset: { [weak self] in
                 guard let self else { return }
                 self.workspaceGeometry.reset()
+                self.floatingPlacement.dock()
+                self.ambientPresentation.isFloating = false
+                self.panelMetrics.isFloating = false
                 self.resizeWorkspaceForCurrentPage()
+            },
+            onGeometryMoveCommit: { [weak self] frame, screen in
+                self?.commitWorkspaceMove(frame, on: screen)
             }
         )
         let workspaceHostingView = NSHostingView(rootView: workspace)
@@ -248,10 +277,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         workspaceHostingView.layer?.masksToBounds = true
         workspaceHostingView.autoresizingMask = [.width, .height]
         drawerView = workspaceHostingView
-        panel.contentView = workspaceHostingView
+        panel.contentView = WorkspacePanelContainer(workspace: workspaceHostingView)
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.hasShadow = false
+        panel.hasShadow = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         panel.hidesOnDeactivate = false
@@ -269,9 +298,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             presentation: ambientPresentation,
             onOpen: { [weak self] in
                 self?.toggleAmbientClick()
-            }
+            },
+            onMove: { [weak self] frame, screen in self?.commitBubbleMove(frame, on: screen) },
+            onDock: { [weak self] in self?.dockFloatingQuota() }
         )
         let ambientHostingView = NSHostingView(rootView: ambient)
+        ambientHostingView.sizingOptions = []
         ambientHostingView.wantsLayer = true
         ambientHostingView.layer?.backgroundColor = NSColor.clear.cgColor
         ambientHostingView.autoresizingMask = [.width, .height]
@@ -352,6 +384,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startAmbientEnvironmentTracking() {
         ambientPresentation.observeForeground(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+        quotaConnections.cursorAccount?.modelMonitor.observeForeground(
+            bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+            pid: NSWorkspace.shared.frontmostApplication?.processIdentifier)
         let workspaceCenter = NSWorkspace.shared.notificationCenter
         workspaceCenter.addObserver(
             self,
@@ -380,6 +415,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let foreground = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             ?? NSWorkspace.shared.frontmostApplication
         ambientPresentation.observeForeground(bundleIdentifier: foreground?.bundleIdentifier)
+        quotaConnections.cursorAccount?.modelMonitor.observeForeground(bundleIdentifier: foreground?.bundleIdentifier,
+            pid: foreground?.processIdentifier)
         refreshAmbientEnvironment()
 
         // Space and full-screen window metadata can settle one run-loop later
@@ -412,6 +449,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Pointer movement may only keep an already-open panel visible or hide it.
         // Opening is exclusively handled by click, shortcut, or menu actions.
         guard panelPresentationMode == .workspace, panel.isVisible else { return }
+        if NSEvent.pressedMouseButtons != 0 { pointerOutsideSince = nil; return }
+        // An active setup page closes deliberately, never during login or IME.
+        if workspaceNavigation.showsQuotaConnections {
+            pointerOutsideSince = nil
+            return
+        }
         if store.memoEditingActive || noteStore.isEditing || timePlanStore.isEditing {
             pointerOutsideSince = nil
             return
@@ -422,7 +465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // as part of the drawer so it remains usable while the main panel is open.
         let insidePanelOrPopover = isInsideDrawerOrPopover(pointer)
 
-        if isPinnedByHotKey {
+        if isPinnedByHotKey && !floatingPlacement.isFloating {
             pointerOutsideSince = nil
             return
         }
@@ -440,7 +483,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.pointerOutsideSince = now
             return false
         }
-        return now.timeIntervalSince(pointerOutsideSince) >= 0.5
+        return now.timeIntervalSince(pointerOutsideSince) >= (floatingPlacement.isFloating ? 1.5 : 0.5)
     }
 
     private func toggleAmbientClick() {
@@ -451,7 +494,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             isPinnedByHotKey = false
             hidePanel(on: screen)
         } else {
-            isPinnedByHotKey = true
+            isPinnedByHotKey = !floatingPlacement.isFloating
             // Reversing a close continues the same workspace, including drafts
             // and scroll position. Only a fully closed panel starts at Home.
             if panelPresentationMode == .ambient { workspaceNavigation.openFromNotch() }
@@ -460,6 +503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showPanel(on screen: NSScreen) {
+        let screen = floatingPlacement.preferredScreen(fallback: screen) ?? screen
         if presentationModeEnabled {
             layoutAmbientPanel(on: screen, animated: false)
             ambientPanel.orderFrontRegardless()
@@ -470,9 +514,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             screen.safeAreaInsets.top,
             screen.frame.maxY - screen.visibleFrame.maxY
         )
-        panelMetrics.topInset = menuBarHeight + 4
-        let targetFrame = workspaceGeometry.frame(navigation: workspaceNavigation,
+        panelMetrics.isFloating = floatingPlacement.isFloating
+        ambientPresentation.isFloating = floatingPlacement.isFloating
+        panelMetrics.topInset = floatingPlacement.isFloating ? 0 : menuBarHeight + 4
+        drawerView.layer?.cornerRadius = workspaceNavigation.isQuotaHome ? 22 : IslandTheme.radiusPanel
+        let savedFrame = workspaceGeometry.frame(navigation: workspaceNavigation,
             topInset: panelMetrics.topInset, screen: screen.frame)
+        let targetFrame = floatingPlacement.isFloating
+            ? floatingPlacement.workspaceFrame(size: savedFrame.size, on: screen, minimumSize: workspaceMinimumSize) : savedFrame
         let size = targetFrame.size
 
         // If the pointer reaches the notch on another display while the drawer is
@@ -489,6 +538,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let isReversingClose = panelPresentationMode == .workspace && isAnimatingOut && panel.isVisible
         panelPresentationMode = .workspace
+        if floatingPlacement.isFloating {
+            if !isReversingClose {
+                panel.setFrame(floatingPlacement.bubbleFrame(on: screen), display: false)
+                musicService.workspaceDidOpen()
+            }
+            panel.ignoresMouseEvents = false
+            panel.alphaValue = 1
+            startPointerTracking()
+            layoutAmbientPanel(on: screen, animated: false)
+            workspaceMotion.morph(panel, to: targetFrame, direction: .opening, bubbleView: ambientDrawerView) { [weak self] in
+                guard let self, self.panelPresentationMode == .workspace else { return }
+                // A route selected during opening must not lose its larger viewport.
+                self.resizeWorkspaceForCurrentPage()
+                self.checkPointer()
+            }
+            panel.orderFrontRegardless()
+            ambientPanel.orderOut(nil)
+            return
+        }
         // Keep the real window in its final position. Only its clipped content
         // moves, avoiding off-screen NSPanel frame constraints near the notch.
         if !isReversingClose {
@@ -512,8 +580,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func resizeWorkspaceForCurrentPage() {
         guard panelPresentationMode == .workspace, panel.isVisible, !isAnimatingIn, !isAnimatingOut,
               let screen = panel.screen ?? preferredAmbientScreen() else { return }
-        // AppKit still owns the frame. Only an explicit page change selects a new
-        // bounded size; account counts and text wrapping can never grow the window.
+        // AppKit still owns the bounded frame. Home reports semantic count/chrome
+        // changes, never an unconstrained text-wrapping/minimum-size probe.
         showPanel(on: screen)
     }
 
@@ -525,6 +593,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The fading workspace must not intercept clicks on the app below it.
         // The separate quota shelf remains clickable to reverse this dismissal.
         panel.ignoresMouseEvents = true
+        if floatingPlacement.isFloating, let screen = floatingPlacement.preferredScreen(fallback: panel.screen) {
+            layoutAmbientPanel(on: screen, animated: false)
+            workspaceMotion.morph(panel, to: floatingPlacement.bubbleFrame(on: screen), direction: .closing,
+                                  bubbleView: ambientDrawerView) { [weak self] in
+                guard let self, self.panelPresentationMode == .workspace else { return }
+                self.store.requestMemoListReset()
+                self.showAmbientPanel(on: screen)
+            }
+            return
+        }
         workspaceMotion.move(drawerView, to: NSPoint(x: 0, y: panel.frame.height - 42),
                              direction: .closing) { [weak self] in
             guard let self, self.panelPresentationMode == .workspace else { return }
@@ -536,7 +614,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showAmbientPanel(on screen: NSScreen?) {
-        guard let screen else { return }
+        guard let screen = floatingPlacement.preferredScreen(fallback: screen) else { return }
         workspaceMotion.cancel()
         panelPresentationMode = .ambient
         workspaceNavigation.closeQuotaConnections()
@@ -545,6 +623,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pointerTrackingTimer = nil
         panel.orderOut(nil)
         panel.ignoresMouseEvents = false
+
+        ambientPresentation.isFloating = floatingPlacement.isFloating
+        panelMetrics.isFloating = floatingPlacement.isFloating
 
         let geometry = ambientGeometry(on: screen)
         ambientPresentation.centerGapWidth = geometry.centerGapWidth
@@ -585,6 +666,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func applyAmbientCornerMask() {
         guard let layer = ambientDrawerView.layer else { return }
+        if floatingPlacement.isFloating {
+            layer.cornerRadius = 0
+            layer.maskedCorners = []
+            layer.masksToBounds = false
+            return
+        }
         layer.cornerCurve = .continuous
         layer.cornerRadius = ambientPresentation.isFrontmostAppFullScreen ? 12 : 16
         layer.maskedCorners = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
@@ -597,6 +684,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func ambientGeometry(on screen: NSScreen) -> AmbientGeometry {
+        if floatingPlacement.isFloating {
+            let screen = floatingPlacement.preferredScreen(fallback: screen) ?? screen
+            return AmbientGeometry(frame: floatingPlacement.bubbleFrame(on: screen), centerGapWidth: 0)
+        }
         let notch = physicalNotchGap(on: screen)
         let hasPhysicalNotch = notch != nil
         let centerGap = notch?.width ?? 14
@@ -770,6 +861,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let screen = screenContainingMouse() ?? NSScreen.main else { return }
 
         if event.type == .leftMouseDown,
+           !floatingPlacement.isFloating,
            !ambientPanel.frame.contains(pointer),
            notchTrigger(on: screen).contains(pointer) {
             toggleAmbientClick()
@@ -780,6 +872,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func dismissHotKeyPanelIfClickedOutside(at pointer: NSPoint) {
+        // WebKit login and IME candidate windows may belong to another process.
+        // Setup is closed with its explicit action, never by an outside click.
+        guard !workspaceNavigation.showsQuotaConnections else { return }
         if presentationModeEnabled && (store.memoEditingActive || noteStore.isEditing || timePlanStore.isEditing) { return }
         // An IME candidate panel may belong to the input-method process, not our
         // window list. Do not dismiss the note beneath a candidate-selection click.
@@ -803,6 +898,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hidePanel(on: screen)
     }
 
+    private var workspaceMinimumSize: NSSize {
+        workspaceNavigation.layoutKey == "quota" ? QuotaHomeLayout.minimumSize : NSSize(width: 480, height: 320)
+    }
+
+    private func commitWorkspaceMove(_ frame: NSRect, on screen: NSScreen) {
+        let oldInset = panelMetrics.topInset
+        if QuotaFloatingPlacement.shouldDock(frame, on: screen.frame) { floatingPlacement.dock() }
+        else { floatingPlacement.detach(at: NSPoint(x: frame.midX, y: frame.maxY - 46), on: screen) }
+        ambientPresentation.isFloating = floatingPlacement.isFloating
+        panelMetrics.isFloating = floatingPlacement.isFloating
+        panelMetrics.topInset = floatingPlacement.isFloating ? 0 : max(screen.safeAreaInsets.top,
+            screen.frame.maxY - screen.visibleFrame.maxY) + 4
+        // Keep usable content height constant across the menu-band transition,
+        // including manually resized routes. No spare band moves to the bottom.
+        var contentFrame = frame
+        contentFrame.size.height = frame.height - oldInset + panelMetrics.topInset
+        contentFrame.origin.y = frame.maxY - contentFrame.height
+        contentFrame = WorkspacePanelGeometry.bounded(contentFrame, on: screen.frame, minimumSize: workspaceMinimumSize)
+        if !floatingPlacement.isFloating {
+            // A drop inside the dock zone is an attachment, not a saved near miss.
+            contentFrame.origin.x = screen.frame.midX - contentFrame.width / 2
+            contentFrame.origin.y = screen.frame.maxY - contentFrame.height
+        }
+        panel.setFrame(contentFrame, display: true)
+        workspaceGeometry.record(contentFrame, route: workspaceNavigation.layoutKey, screen: screen.frame, manualResize: false)
+        pointerOutsideSince = nil
+        if floatingPlacement.isFloating { ambientPanel.orderOut(nil) }
+        else { layoutAmbientPanel(on: screen, animated: false); ambientPanel.orderFrontRegardless() }
+    }
+
+    private func commitBubbleMove(_ frame: NSRect, on screen: NSScreen) {
+        if QuotaFloatingPlacement.shouldDock(frame, on: screen.frame) { dockFloatingQuota(on: screen); return }
+        floatingPlacement.detach(at: NSPoint(x: frame.midX, y: frame.midY), on: screen)
+        layoutAmbientPanel(on: screen, animated: false)
+    }
+
+    private func dockFloatingQuota(on screen: NSScreen? = nil) {
+        guard let screen = screen ?? preferredAmbientScreen() else { return }
+        let oldInset = panelMetrics.topInset
+        var restoredFrame = workspaceGeometry.frame(navigation: workspaceNavigation,
+            topInset: oldInset, screen: screen.frame)
+        floatingPlacement.dock()
+        ambientPresentation.isFloating = false
+        panelMetrics.isFloating = false
+        panelMetrics.topInset = max(screen.safeAreaInsets.top,
+            screen.frame.maxY - screen.visibleFrame.maxY) + 4
+        // Returning the circle attaches its position, not a global layout reset.
+        // Retain each route's saved dimensions and only restore this menu band.
+        restoredFrame.size.height += panelMetrics.topInset - oldInset
+        restoredFrame = WorkspacePanelGeometry.bounded(restoredFrame, on: screen.frame, minimumSize: workspaceMinimumSize)
+        restoredFrame.origin.x = screen.frame.midX - restoredFrame.width / 2
+        restoredFrame.origin.y = screen.frame.maxY - restoredFrame.height
+        workspaceGeometry.record(restoredFrame, route: workspaceNavigation.layoutKey, screen: screen.frame, manualResize: false)
+        if panelPresentationMode == .workspace { resizeWorkspaceForCurrentPage() }
+        else { showAmbientPanel(on: screen) }
+    }
+
     @objc private func openFromMenu() {
         guard let screen = NSScreen.main else { return }
         isPinnedByHotKey = true
@@ -815,6 +967,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func togglePresentationMode() {
         presentationModeEnabled.toggle()
+        if AppEnvironment.ownedQuotaConnectionsEnabled { quotaResetReminders.isSuppressed = presentationModeEnabled }
         AppEnvironment.defaults.set(presentationModeEnabled, forKey: "presentation-mode-enabled-v1")
         presentationMenuItem?.state = presentationModeEnabled ? .on : .off
         revealPolicy.reset()
@@ -864,7 +1017,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pointer = NSEvent.mouseLocation
         let frame = ambientGeometry(on: screen).frame
         let visible = ambientPanel.isVisible || panel.isVisible
-        let editing = panel.isVisible && (store.memoEditingActive || noteStore.isEditing || timePlanStore.isEditing || noteStore.composingDraftID != nil)
+        let editing = panel.isVisible && (store.memoEditingActive || noteStore.isEditing || timePlanStore.isEditing || noteStore.composingDraftID != nil || workspaceNavigation.showsQuotaConnections)
         let action = revealPolicy.update(now: ProcessInfo.processInfo.systemUptime,
             region: NSStringFromRect(screen.frame), insideTrigger: frame.contains(pointer),
             insideVisibleSurface: isInsideDrawerOrPopover(pointer), visible: visible, editing: editing)

@@ -23,13 +23,33 @@ import SwiftUI
             try await Task.sleep(for: .milliseconds(10))
         }
         guard store.feedSnapshot?.events.count == 1 else { fatalError("Fixture failed to load") }
-        let host = NSHostingController(rootView: QuotaResetFeedView(connections: store))
-        let size = host.view.fittingSize
-        guard size.height >= 380 && size.height <= 620 else {
-            print("FAIL: Loaded public feed collapsed its scrolling event viewport: \(size)")
+        let window = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 460, height: 230),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        let host = NSHostingView(rootView: QuotaResetFeedView(connections: store))
+        window.contentView = host
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        try await Task.sleep(for: .milliseconds(150))
+        host.layoutSubtreeIfNeeded()
+        let scrolls = scrollViews(in: host)
+        guard let scroll = scrolls.first, scroll.contentView.bounds.height >= 80,
+              scroll.frame.height <= host.bounds.height else {
+            print("FAIL: Public events need a visible scrolling viewport inside the compact panel")
             exit(1)
         }
+        guard host.bounds.width == 460 && host.bounds.height == 230 else {
+            print("FAIL: Public feed must not enlarge its parent window")
+            exit(1)
+        }
+        if let destination = ProcessInfo.processInfo.environment["PAUL_PREVIEW_DIRECTORY"],
+           let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: destination).appendingPathComponent("reset-feed-native.png"))
+        }
         store.stop()
-        print("PASS: loaded public feed keeps a visible, bounded native popover viewport: \(size)")
+        print("PASS: public events scroll inside a 460×230 native page without a popover or oversized window")
+    }
+    @MainActor static func scrollViews(in view: NSView) -> [NSScrollView] {
+        (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap { scrollViews(in: $0) }
     }
 }

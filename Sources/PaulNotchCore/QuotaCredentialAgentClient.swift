@@ -1,21 +1,30 @@
 import Foundation
 import Security
 
-/// Stable, pinned helper for the owner's three dedicated credential items.
+/// Stable pinned helpers: legacy records or independently scoped custom APIs.
 /// The helper authenticates the parent independently before reading its input.
 @MainActor struct QuotaCredentialAgentClient {
     enum Generation {
-        case legacyV1, stableV2
-        var filename: String { self == .legacyV1 ? "PaulCredentialAgent" : "PaulCredentialAgentV2" }
-        var identifier: String { "local.paul.notch.credential-agent.\(self == .legacyV1 ? "v1" : "v2")" }
+        case legacyV1, stableV2, customV1
+        var filename: String {
+            switch self { case .legacyV1: "PaulCredentialAgent"; case .stableV2: "PaulCredentialAgentV2"; case .customV1: "PaulCustomQuotaAgentV1" }
+        }
+        var identifier: String {
+            switch self {
+            case .legacyV1: "local.paul.notch.credential-agent.v1"
+            case .stableV2: "local.paul.notch.credential-agent.v2"
+            case .customV1: "local.paul.notch.custom-quota-agent.v1"
+            }
+        }
     }
     private let executable: URL
     private let arguments: [String]
     let service: String
-    init(executable: URL, service: String, arguments: [String] = []) {
-        self.executable = executable; self.service = service; self.arguments = arguments
+    private let account: String?
+    init(executable: URL, service: String, arguments: [String] = [], account: String? = nil) {
+        self.executable = executable; self.service = service; self.arguments = arguments; self.account = account
     }
-    static func bundled(service: String, generation: Generation = .legacyV1) throws -> Self? {
+    static func bundled(service: String, generation: Generation = .legacyV1, account: String? = nil) throws -> Self? {
         guard Bundle.main.bundleIdentifier == "local.paul.home-preview-20260905" else { return nil }
         let url = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/\(generation.filename)")
         guard url.standardizedFileURL == url.resolvingSymlinksInPath() else { throw QuotaConnectionError.keychain }
@@ -26,12 +35,12 @@ import Security
               code != nil, SecStaticCodeCheckValidity(code!, [], requirement) == errSecSuccess else {
             throw QuotaConnectionError.keychain
         }
-        return .init(executable: url, service: service)
+        return .init(executable: url, service: service, account: account)
     }
     func request(_ operation: String, value: String? = nil) throws -> String? {
-        struct Request: Encodable { let operation, service: String; let value: String? }
+        struct Request: Encodable { let operation, service: String; let value: String?; let account: String? }
         struct Response: Decodable { let status: Int32; let value: String? }
-        let payload = try JSONEncoder().encode(Request(operation: operation, service: service, value: value))
+        let payload = try JSONEncoder().encode(Request(operation: operation, service: service, value: value, account: account))
         guard payload.count <= 65_536 else { throw QuotaConnectionError.keychain }
         let process = Process(), input = Pipe(), output = Pipe()
         process.executableURL = executable; process.arguments = arguments
@@ -41,7 +50,7 @@ import Security
         process.standardError = FileHandle.nullDevice
         do { try process.run() } catch { throw QuotaConnectionError.keychain }
         let deadline = CredentialAgentDeadline(process: process,
-            seconds: ["authorize", "save", "delete"].contains(operation) ? 180 : 8)
+            seconds: account == nil && ["authorize", "save", "delete"].contains(operation) ? 180 : 8)
         defer { deadline.cancel() }
         do {
             try input.fileHandleForWriting.write(contentsOf: payload)

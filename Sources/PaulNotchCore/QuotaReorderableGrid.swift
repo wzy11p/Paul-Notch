@@ -7,6 +7,8 @@ struct QuotaReorderableGrid: NSViewRepresentable {
     let accounts: [QuotaOverviewAccount]
     let pinnedID: String?
     var enabled = true
+    var isEditing = false
+    var onRemove: ((String) -> Void)? = nil
     let onOpen: (String) -> Void
     let onReorder: ([String]) -> Void
 
@@ -14,7 +16,8 @@ struct QuotaReorderableGrid: NSViewRepresentable {
     func updateNSView(_ view: QuotaGridScrollView, context: Context) {
         view.grid.onOpen = onOpen
         view.grid.onReorder = onReorder
-        view.grid.configure(accounts: accounts, pinnedID: pinnedID, enabled: enabled)
+        view.grid.onRemove = onRemove
+        view.grid.configure(accounts: accounts, pinnedID: pinnedID, enabled: enabled, isEditing: isEditing)
     }
     static func dismantleNSView(_ view: QuotaGridScrollView, coordinator: ()) {
         view.grid.cancelTracking()
@@ -28,12 +31,13 @@ final class QuotaGridScrollView: NSScrollView {
         super.init(frame: .zero)
         drawsBackground = false
         borderType = .noBorder
-        hasVerticalScroller = true
+        hasVerticalScroller = false
         hasHorizontalScroller = false
         autohidesScrollers = true
         scrollerStyle = .overlay
         horizontalScrollElasticity = .none
-        verticalScrollElasticity = .none
+        verticalScrollElasticity = .automatic
+        usesPredominantAxisScrolling = true
         documentView = grid
         appearance = NSAppearance(named: .darkAqua)
     }
@@ -53,9 +57,11 @@ final class QuotaGridDocumentView: NSView {
     private(set) var dragging = false
     var onOpen: (String) -> Void = { _ in }
     var onReorder: ([String]) -> Void = { _ in }
+    var onRemove: ((String) -> Void)?
     var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     private var viewport = NSSize.zero
     private var enabled = true
+    private var isEditing = false
     private var trackedID: String?
     private var start = NSPoint.zero
     private var pointer = NSPoint.zero
@@ -77,13 +83,15 @@ final class QuotaGridDocumentView: NSView {
     convenience init() { self.init(frame: .zero) }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(accounts next: [QuotaOverviewAccount], pinnedID: String?, enabled: Bool) {
+    func configure(accounts next: [QuotaOverviewAccount], pinnedID: String?, enabled: Bool, isEditing: Bool = false) {
         let wasEnabled = self.enabled
         if wasEnabled && !enabled, let card = window?.firstResponder as? QuotaGridButton, card.owner === self {
             focusToRestore = card.account.id
             window?.makeFirstResponder(nil)
         }
         self.enabled = enabled
+        if self.isEditing != isEditing { cancelTracking() }
+        self.isEditing = isEditing
         setAccessibilityHidden(!enabled)
         if !enabled || next.map(\.id) != accounts.map(\.id) { cancelTracking() }
         let previous = Dictionary(uniqueKeysWithValues: buttons.map { ($0.account.id, $0) })
@@ -93,6 +101,7 @@ final class QuotaGridDocumentView: NSView {
             let button = previous[account.id] ?? QuotaGridButton(account: account)
             button.owner = self
             button.isEnabled = enabled
+            button.setRemoval(available: onRemove != nil, editing: isEditing, enabled: enabled)
             button.update(account: account, pinned: account.id == pinnedID)
             if button.superview == nil { addSubview(button) }
             return button
@@ -117,16 +126,17 @@ final class QuotaGridDocumentView: NSView {
         if changed { cancelTracking() }
         viewport = size
         let layout = QuotaBentoLayout(width: size.width, accountCount: accounts.count)
-        let rows = (accounts.count + layout.columns - 1) / layout.columns
-        let height = Double(rows) * (layout.cardWidth + layout.spacing) - (rows == 0 ? 0 : layout.spacing) + 4
-        setFrameSize(NSSize(width: size.width, height: max(size.height, height)))
+        setFrameSize(NSSize(width: size.width, height: max(size.height, layout.contentHeight)))
+        // Full-fit Home is stationary. Native wheel/momentum remains available
+        // only for screen-limited or deliberately smaller manual viewports.
+        enclosingScrollView?.verticalScrollElasticity = layout.contentHeight > size.height + 0.5 ? .allowed : .none
         layoutCards(animated: false)
     }
 
     func slot(_ index: Int) -> NSRect {
         let layout = QuotaBentoLayout(width: viewport.width, accountCount: accounts.count)
         let pitch = layout.cardWidth + layout.spacing
-        return NSRect(x: layout.leadingInset + Double(index % layout.columns) * pitch, y: Double(index / layout.columns) * pitch + 2,
+        return NSRect(x: layout.leadingInset + Double(index % layout.columns) * pitch, y: Double(index / layout.columns) * pitch + QuotaBentoLayout.edgeInset,
                       width: layout.cardWidth, height: layout.cardWidth)
     }
 
@@ -183,10 +193,12 @@ final class QuotaGridDocumentView: NSView {
             }
             NSCursor.closedHand.push()
             cursorPushed = true
-            let timer = Timer(timeInterval: 1.0 / 60, target: self, selector: #selector(autoScroll),
-                              userInfo: nil, repeats: true)
-            scrollTimer = timer
-            RunLoop.main.add(timer, forMode: .common)
+            if bounds.height > viewport.height + 0.5 {
+                let timer = Timer(timeInterval: 1.0 / 60, target: self, selector: #selector(autoScroll),
+                                  userInfo: nil, repeats: true)
+                scrollTimer = timer
+                RunLoop.main.add(timer, forMode: .common)
+            }
         }
         guard dragging else { return }
         let before = candidateIDs
@@ -196,7 +208,7 @@ final class QuotaGridDocumentView: NSView {
             let center = NSPoint(x: point.x - grabOffset.x + layout.cardWidth / 2,
                                  y: point.y - grabOffset.y + layout.cardWidth / 2)
             let column = max(0, min(layout.columns - 1, Int(floor((center.x - layout.leadingInset + layout.spacing / 2) / pitch))))
-            let row = max(0, Int(floor((center.y - 2 + layout.spacing / 2) / pitch)))
+            let row = max(0, Int(floor((center.y - QuotaBentoLayout.edgeInset + layout.spacing / 2) / pitch)))
             let target = min(accounts.count - 1, row * layout.columns + column)
             candidateIDs.remove(at: source)
             candidateIDs.insert(id, at: target)
@@ -232,9 +244,16 @@ final class QuotaGridDocumentView: NSView {
     }
 
     func open(_ id: String) {
-        guard enabled, trackedID == nil else { return }
+        guard enabled, !isEditing, trackedID == nil else { return }
         focusToRestore = id
         onOpen(id)
+    }
+
+    func remove(_ id: String) {
+        guard enabled, accounts.contains(where: { $0.id == id }), let onRemove else { return }
+        cancelTracking()
+        focusToRestore = nil
+        onRemove(id)
     }
 
     func move(_ id: String, by delta: Int) {
@@ -298,6 +317,8 @@ final class QuotaGridButton: NSButton {
     private var interaction = QuotaCardInteraction()
     private let host: NSHostingView<AnyView>
     private var hoverArea: NSTrackingArea?
+    private let removeButton = NSButton()
+    private var removalItem: NSMenuItem?
 
     init(account: QuotaOverviewAccount) {
         self.account = account
@@ -312,21 +333,55 @@ final class QuotaGridButton: NSButton {
         host.sizingOptions = []
         host.autoresizingMask = [.width, .height]
         addSubview(host)
+        removeButton.image = NSImage(systemSymbolName: "minus.circle.fill", accessibilityDescription: nil)
+        removeButton.imagePosition = .imageOnly
+        removeButton.isBordered = false
+        removeButton.bezelStyle = .circular
+        removeButton.contentTintColor = NSColor(white: 0.85, alpha: 1)
+        removeButton.target = self
+        removeButton.action = #selector(removeFromHome)
+        removeButton.toolTip = "从首页移除，保留登录"
+        removeButton.setAccessibilityLabel("从首页移除 \(account.name)，保留登录")
+        removeButton.setAccessibilityIdentifier("quota-remove-\(account.id)")
+        removeButton.isHidden = true
+        addSubview(removeButton)
         setAccessibilityIdentifier("quota-account-\(account.id)")
         setAccessibilityRole(.button)
+        setAccessibilityElement(true)
         let menu = NSMenu()
         for (label, action) in [("向前移动", #selector(moveEarlier)), ("向后移动", #selector(moveLater))] {
             let item = menu.addItem(withTitle: label, action: action, keyEquivalent: "")
             item.target = self
         }
+        menu.addItem(.separator())
+        let removeItem = menu.addItem(withTitle: "从首页移除（保留登录）", action: #selector(removeFromHome), keyEquivalent: "")
+        removeItem.identifier = NSUserInterfaceItemIdentifier("quota-remove-account")
+        removeItem.target = self
+        removalItem = removeItem
         self.menu = menu
         update(account: account, pinned: false)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var acceptsFirstResponder: Bool { isEnabled }
-    override func hitTest(_ point: NSPoint) -> NSView? { super.hitTest(point) == nil ? nil : self }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        return hit === removeButton ? removeButton : self
+    }
     override func draw(_ dirtyRect: NSRect) {} // SwiftUI draws the approved card, AppKit owns all input.
-    override func layout() { super.layout(); host.frame = bounds }
+    override func layout() {
+        super.layout()
+        host.frame = bounds
+        let top = isFlipped ? 3.0 : bounds.height - 23
+        removeButton.frame = NSRect(x: bounds.width - 23, y: top, width: 20, height: 20)
+    }
+
+    func setRemoval(available: Bool, editing: Bool, enabled: Bool) {
+        removalItem?.isHidden = !available
+        removalItem?.isEnabled = available && enabled
+        removeButton.isHidden = !available || !editing
+        removeButton.isEnabled = available && enabled
+        setAccessibilityChildren(editing && available ? [removeButton] : [])
+    }
 
     func update(account: QuotaOverviewAccount, pinned: Bool) {
         let changed = self.account != account || self.pinned != pinned
@@ -334,6 +389,7 @@ final class QuotaGridButton: NSButton {
         self.pinned = pinned
         title = account.name
         setAccessibilityLabel(account.accessibilitySummary)
+        removeButton.setAccessibilityLabel("从首页移除 \(account.name)，保留登录")
         setAccessibilityHelp("单击查看详情；拖动调整顺序；Option 加方向键移动，Esc 取消拖动")
         toolTip = "\(account.accessibilitySummary) · 拖动调整顺序"
         if changed || host.frame.isEmpty { redrawCard() }
@@ -352,6 +408,7 @@ final class QuotaGridButton: NSButton {
     @objc private func activate() { owner?.open(account.id) }
     @objc private func moveEarlier() { owner?.move(account.id, by: -1) }
     @objc private func moveLater() { owner?.move(account.id, by: 1) }
+    @objc private func removeFromHome() { owner?.remove(account.id) }
     override func mouseDown(with event: NSEvent) {
         guard isEnabled else { return }
         window?.makeFirstResponder(self)
@@ -367,7 +424,7 @@ final class QuotaGridButton: NSButton {
         guard isEnabled else { return }
         if event.keyCode == 53, owner?.dragging == true { owner?.cancelTracking(); return }
         if event.modifierFlags.contains(.option), [123, 124, 125, 126].contains(event.keyCode) {
-            let columns = QuotaBentoLayout(width: Double(owner?.bounds.width ?? 0), accountCount: 0).columns
+            let columns = QuotaBentoLayout(width: Double(owner?.bounds.width ?? 0), accountCount: owner?.accounts.count ?? 0).columns
             let delta = event.keyCode == 123 ? -1 : event.keyCode == 124 ? 1 : event.keyCode == 125 ? columns : -columns
             owner?.move(account.id, by: delta)
             return

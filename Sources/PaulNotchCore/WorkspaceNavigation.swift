@@ -3,9 +3,13 @@ import Foundation
 
 enum WorkspacePanelLayout {
     static func size(isQuotaHome: Bool, isQuotaConnection: Bool = false,
-                     topInset: CGFloat, screenWidth: CGFloat) -> CGSize {
-        CGSize(width: min(isQuotaConnection ? 760 : isQuotaHome ? 600 : 868, screenWidth - 24),
-               height: topInset + (isQuotaConnection ? 620 : isQuotaHome ? 438 : 417))
+                     topInset: CGFloat, screenWidth: CGFloat, screenHeight: CGFloat = 900,
+                     quotaLayout: QuotaHomeLayout = QuotaHomeLayout()) -> CGSize {
+        if isQuotaHome && !isQuotaConnection {
+            return quotaLayout.size(topInset: topInset, screen: CGSize(width: screenWidth, height: screenHeight))
+        }
+        return CGSize(width: min(isQuotaConnection ? 760 : 868, screenWidth - 24),
+                      height: topInset + (isQuotaConnection ? 620 : 417))
     }
 }
 
@@ -17,6 +21,13 @@ final class WorkspaceNavigation: ObservableObject {
     @Published private(set) var showsQuotaConnections = false
     @Published var quotaConnectionSelection: String?
     var onLayoutChange: (() -> Void)?
+    private(set) var quotaLayout = QuotaHomeLayout()
+
+    func updateQuotaLayout(_ layout: QuotaHomeLayout) {
+        guard layout != quotaLayout else { return }
+        quotaLayout = layout
+        if layoutKey == "quota" { onLayoutChange?() }
+    }
 
     var isQuotaHome: Bool { selectedTab == .home && !showsToolsHome }
     var layoutKey: String { showsQuotaConnections && isQuotaHome ? "connections" : isQuotaHome ? "quota" : "tools" }

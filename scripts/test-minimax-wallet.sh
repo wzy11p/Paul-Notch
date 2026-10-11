@@ -9,7 +9,10 @@ swiftc -swift-version 6 -parse-as-library \
   Sources/PaulNotchCore/MiniMaxWalletBalance.swift Sources/PaulNotchCore/QuotaOverviewPresentation.swift \
   Sources/PaulNotchCore/DesktopQuotaModels.swift Sources/PaulNotchCore/DesktopQuotaStore.swift \
   Sources/PaulNotchCore/CursorQuotaModels.swift Sources/PaulNotchCore/CursorQuotaAccountStore.swift \
+  Sources/PaulNotchCore/CursorModelContext.swift Sources/PaulNotchCore/CursorModelMonitor.swift \
+  Sources/PaulNotchCore/CursorWebContext.swift \
   Sources/PaulNotchCore/WebsiteQuotaModels.swift Sources/PaulNotchCore/WebsiteQuotaStore.swift Sources/PaulNotchCore/WebsiteQuotaBrowser.swift Sources/PaulNotchCore/MuseQuotaCapture.swift Sources/PaulNotchCore/MuseBackgroundLayout.swift Sources/PaulNotchCore/QuotaInteractiveWebView.swift \
+  Sources/PaulNotchCore/MuseSubscriptionReader.swift Sources/PaulNotchCore/MuseSubscriptionScript.swift \
   Tests/QuotaOverview/MiniMaxWalletValidation.swift -o "$quota_output/validate"
 "$quota_output/validate"
 print -r -- "Evidence: $quota_output"

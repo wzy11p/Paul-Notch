@@ -31,7 +31,7 @@ private final class ForegroundApplicationFixture: NSRunningApplication, @uncheck
         guard let shelf = app.windows.first(where: { $0 is AmbientPanel }),
               let ambient = shelf.contentView as? NSHostingView<AmbientNotchView>,
               let workspace = app.windows.first(where: { $0 is IslandPanel }),
-              let home = workspace.contentView as? NSHostingView<IslandView> else {
+              let home = (workspace.contentView as? WorkspacePanelContainer)?.workspace as? NSHostingView<IslandView> else {
             throw Failure(description: "Missing the real shared shelf/workspace")
         }
         home.rootView.onCloseWorkspace()

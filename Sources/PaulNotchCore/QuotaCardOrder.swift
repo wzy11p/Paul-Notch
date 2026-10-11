@@ -36,3 +36,26 @@ final class QuotaCardOrderStore: ObservableObject {
         saved = next
     }
 }
+
+/// Home visibility is independent of account authorization and the saved order.
+@MainActor
+final class QuotaCardVisibilityStore: ObservableObject {
+    private static let key = "quota-card-hidden-v1"
+    private let defaults: UserDefaults
+    @Published private(set) var hidden: Set<String>
+
+    init(defaults: UserDefaults) {
+        self.defaults = defaults
+        hidden = Set((defaults.stringArray(forKey: Self.key) ?? []).filter { !$0.isEmpty })
+    }
+
+    func hide(_ id: String, available: [String]) {
+        guard available.contains(id), hidden.insert(id).inserted else { return }
+        defaults.set(hidden.sorted(), forKey: Self.key)
+    }
+
+    func show(_ id: String) {
+        guard hidden.remove(id) != nil else { return }
+        defaults.set(hidden.sorted(), forKey: Self.key)
+    }
+}

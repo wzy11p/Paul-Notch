@@ -15,7 +15,7 @@ import SwiftUI
         }
         settle(0.4)
         let window = app.windows.first { $0 is IslandPanel }!
-        let host = window.contentView as! NSHostingView<IslandView>
+        let host = (window.contentView as! WorkspacePanelContainer).workspace as! NSHostingView<IslandView>
         let ambient = app.windows.first { $0 is AmbientPanel }!.contentView as! NSHostingView<AmbientNotchView>
         host.rootView.onCloseWorkspace(); settle(0.6)
         ambient.rootView.onOpen(); settle(0.6)
@@ -25,6 +25,7 @@ import SwiftUI
             exit(1)
         }
         let original = window.frame
+        let originalTopInset = host.rootView.panelMetrics.topInset
         func drag(_ view: NSView, dx: CGFloat, dy: CGFloat) {
             let p = window.convertPoint(toScreen: view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil))
             func event(_ type: NSEvent.EventType, _ global: NSPoint) -> NSEvent {
@@ -42,7 +43,9 @@ import SwiftUI
         try require(abs(window.frame.minX - original.minX - 80) < 1 &&
                     abs(window.frame.maxY - original.maxY + 60) < 1,
                     "dragging the grip moves the existing panel with the pointer")
-        try require(window.frame.size == original.size, "moving never resizes the panel")
+        try require(window.frame.width == original.width &&
+                    abs(window.frame.height - host.rootView.panelMetrics.topInset - original.height + originalTopInset) < 1,
+                    "detaching removes only the menu band, preserving usable size and width")
         let moved = window.frame
         drag(resize, dx: 90, dy: -80)
         try require(abs(window.frame.width - moved.width - 90) < 1 &&
@@ -59,16 +62,17 @@ import SwiftUI
         host.rootView.navigation.showQuotaConnections(selectedProvider: "muse"); settle(0.15)
         try require(window.frame.width >= 740 && window.frame.height > resized.height,
                     "connection setup opens a larger workspace without stretching Home cards")
-        try require(host === window.contentView, "the connection route never opens a second workspace")
+        try require(host === (window.contentView as? WorkspacePanelContainer)?.workspace,
+                    "the connection route never opens a second workspace")
         host.rootView.navigation.closeQuotaConnections(); settle(0.15)
         try require(window.frame == resized, "returning Home restores its own chosen size")
         host.rootView.onCloseWorkspace(); settle(0.6)
         ambient.rootView.onOpen(); settle(0.6)
         try require(window.frame == resized, "collapse/reopen preserves chosen geometry")
-        try require(host === window.contentView && app.windows.filter { $0 is IslandPanel }.count == 1,
+        try require(host === (window.contentView as? WorkspacePanelContainer)?.workspace && app.windows.filter { $0 is IslandPanel }.count == 1,
                     "move, resize and reopen reuse one native workspace and its stores")
         drag(resize, dx: -10000, dy: 10000)
-        try require(window.frame.width >= 480 && window.frame.height >= 340,
+        try require(window.frame.width >= 360 && window.frame.height >= 240,
                     "shrinking cannot make controls unreachable")
         drag(move, dx: -10000, dy: -10000)
         let screen = window.screen!.frame

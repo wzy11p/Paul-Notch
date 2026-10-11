@@ -26,13 +26,16 @@ enum QuotaHomePresentation {
             if account.id == "deepseek" { return connections.deepSeekAccount(now: now) }
             if account.id == "minimax-api", let miniMax = connections.miniMax { return miniMax.account(now: now) }
             return account
-        }
+        } + (connections.customAPIs?.accounts(now: now) ?? [])
     }
 
     @MainActor
     static func ambient(service: AmbientQuotaService, snapshot: CodexQuotaSnapshot?, error: String?,
                         readsEnabled: Bool, connections: QuotaConnectionsStore,
                         tasksAreFresh: Bool, runningTaskCount: Int, now: Date) -> AmbientQuotaPresentation {
+        // Browser identity alone is never enough. Only a fresh, foreground,
+        // exact-origin agent document may override the last desktop provider.
+        let service: AmbientQuotaService = connections.cursorAccount?.modelMonitor.recognizesCursorWeb(at: now) == true ? .cursor : service
         let account = accounts(snapshot: snapshot, error: error, readsEnabled: readsEnabled,
             now: now, connections: connections).first { $0.id == service.rawValue }
             ?? pending(service.rawValue, service.name, "桌面会员", .membership)
@@ -55,7 +58,8 @@ enum QuotaHomePresentation {
         return .make(service: service, account: account,
             codexWindows: readsEnabled ? (snapshot?.visibleWindows ?? []) : [],
             resetsAt: resetsAt, observedAt: observedAt, tasksAreFresh: tasksAreFresh,
-            runningTaskCount: runningTaskCount, at: now)
+            runningTaskCount: runningTaskCount,
+            cursorModel: connections.cursorAccount?.modelMonitor.context(at: now) ?? .unavailable, at: now)
     }
 
     private static func pending(_ id: String, _ name: String, _ account: String,

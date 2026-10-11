@@ -11,7 +11,7 @@ struct QuotaHomeIntegrationValidation {
         }
         let navigation = WorkspaceNavigation()
         let quotaSize = WorkspacePanelLayout.size(isQuotaHome: true, topInset: 38, screenWidth: 1440)
-        check(quotaSize.width == 600 && quotaSize.height < 500, "Quota Home needs a compact fixed panel for square cards")
+        check(quotaSize.width <= 530 && quotaSize.height < 400, "Quota Home fits a compact two-row panel")
         let toolSize = WorkspacePanelLayout.size(isQuotaHome: false, topInset: 38, screenWidth: 1440)
         check(toolSize.width == 868, "Legacy tools must keep their existing working width")
         check(navigation.selectedTab == .home, "The existing workspace must start at quota Home, not Memo")
@@ -66,7 +66,57 @@ struct QuotaHomeIntegrationValidation {
         check(QuotaHomePresentation.accounts(snapshot: snapshot, error: nil, readsEnabled: true,
                                              now: now.addingTimeInterval(180)).first?.status == .stale,
               "A stalled source must age out instead of staying fresh forever")
+        // Exercise the actual Home binding, not only the preference helper.
+        guard AppEnvironment.isPreview else { exit(2) }
+        _ = NSApplication.shared
+        NSApp.setActivationPolicy(.prohibited)
+        NSApp.finishLaunching()
+        let defaults = AppEnvironment.defaults
+        let vault = UnusedVault()
+        let connections = QuotaConnectionsStore(defaults: defaults, vault: vault, allowsConnections: false,
+            transport: { _ in throw QuotaConnectionError.preview })
+        let status = CodexStatusStore()
+        let host = NSHostingView(rootView: AnyView(QuotaHomeView(codexStatus: status, connections: connections,
+            tools: [], onSelectTool: { _ in }, onClose: {})))
+        host.sizingOptions = []
+        let window = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: 520, height: 336),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.contentView = host
+        window.orderBack(nil)
+        func settle() { host.layoutSubtreeIfNeeded(); RunLoop.main.run(until: Date().addingTimeInterval(0.2)) }
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        settle()
+        for id in ["codex", "cursor", "grok", "doubao", "muse", "deepseek", "minimax-api", "minimax-audio"] {
+            let grid = descendants(host).compactMap { $0 as? QuotaGridDocumentView }.first
+            if let card = grid?.buttons.first(where: { $0.account.id == id }),
+               let item = card.menu?.items.first(where: { $0.identifier?.rawValue == "quota-remove-account" }),
+               let action = item.action {
+                NSApp.sendAction(action, to: item.target, from: item)
+                settle()
+                let visible = descendants(host).compactMap { $0 as? QuotaGridDocumentView }.first?.accounts ?? []
+                check(!visible.contains { $0.id == id }, "Actual Home removes \(id) after the card intent")
+            } else { check(false, "Actual Home offers the removal action for \(id)") }
+        }
+        check(!descendants(host).contains { $0 is QuotaGridDocumentView }, "Removing the last card reaches the empty-state recovery")
+        check(window.frame.size == NSSize(width: 520, height: 336), "Removal never expands the bounded panel")
+        check(vault.calls == 0, "Removing Home cards must never touch saved credentials")
+        let restored = QuotaCardVisibilityStore(defaults: defaults)
+        restored.show("muse")
+        host.rootView = AnyView(QuotaHomeView(codexStatus: status, connections: connections,
+            tools: [], onSelectTool: { _ in }, onClose: {}).id("cold-restoration"))
+        settle()
+        check(descendants(host).compactMap { $0 as? QuotaGridDocumentView }.first?.accounts.map(\.id) == ["muse"],
+              "A recreated actual Home restores the user's saved visible selection")
+        window.orderOut(nil)
         guard failures.isEmpty else { exit(1) }
         print("PASS: existing-notch Home navigation, source-backed Codex values, pending services, opt-in and stale boundaries")
+    }
+    @MainActor final class UnusedVault: QuotaCredentialStoring {
+        var calls = 0
+        func read() throws -> String? { calls += 1; return nil }
+        func save(_ value: String) throws { calls += 1 }
+        func delete() throws { calls += 1 }
     }
 }

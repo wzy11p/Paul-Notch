@@ -45,9 +45,15 @@ struct QuotaGridDragValidation {
         grid.onOpen = { opens.append($0) }
         grid.onReorder = { commits.append($0) }
         reset()
+        let removalItem = grid.buttons[0].menu?.items.first {
+            $0.identifier?.rawValue == "quota-remove-account"
+        }
+        check(removalItem != nil, "Cards must expose an action to remove them from Home, not only reorder them")
         let start = center(0)
         let target = center(2)
         let button = grid.buttons[0]
+        check(button.isAccessibilityElement() && button.accessibilityRole() == .button,
+              "Normal cards remain accessible buttons after adding the hidden removal control")
         check(button.acceptsFirstMouse(for: event(.leftMouseDown, start)),
               "The first deliberate press in the inactive notch must reach the card, not only activate its window")
         button.mouseDown(with: event(.leftMouseDown, start))
@@ -145,6 +151,47 @@ struct QuotaGridDragValidation {
         grid.move("codex", by: 4)
         check(commits.first == ["kimi", "grok", "doubao", "deepseek", "codex", "minimax-api", "minimax-audio"],
               "Keyboard reorders across rows without opening details")
+        var removals: [String] = []
+        grid.onRemove = { removals.append($0) }
+        reset()
+        if let item = grid.buttons[0].menu?.items.first(where: { $0.identifier?.rawValue == "quota-remove-account" }),
+           let action = item.action {
+            NSApp.sendAction(action, to: item.target, from: item)
+        }
+        check(removals == ["codex"] && opens.isEmpty && commits.isEmpty,
+              "The actual card menu removes only that identity without opening, reconnecting or reordering")
+        removals = []
+        grid.configure(accounts: samples, pinnedID: nil, enabled: true, isEditing: true)
+        grid.layoutSubtreeIfNeeded()
+        let editCard = grid.buttons[0]
+        let minus = editCard.subviews.compactMap { $0 as? NSButton }.first {
+            $0.accessibilityIdentifier() == "quota-remove-codex"
+        }
+        check(minus != nil && minus?.isHidden == false && minus?.isEnabled == true,
+              "Edit mode exposes a visible enabled native minus button on each card")
+        check(minus?.acceptsFirstMouse(for: event(.leftMouseDown, center(0))) == true,
+              "The minus works on the first click in an inactive notch")
+        if let minus {
+            let hitPoint = minus.convert(NSPoint(x: minus.bounds.midX, y: minus.bounds.midY), to: grid)
+            check(hitPoint.y < editCard.frame.midY,
+                  "The removal badge belongs at the visible top of a flipped grid, not the clipped lower edge")
+            check(grid.hitTest(hitPoint) === minus, "The card's drag tracker must not swallow the minus hit target")
+            minus.performClick(nil)
+        }
+        check(removals == ["codex"] && opens.isEmpty && commits.isEmpty,
+              "The visible minus sends one remove intent, never an open or reorder")
+        grid.open("codex")
+        check(opens.isEmpty, "Clicking card content while editing cannot enter an accidental login flow")
+        grid.configure(accounts: samples, pinnedID: nil, enabled: false, isEditing: true)
+        grid.remove("codex")
+        check(removals == ["codex"] && minus?.isEnabled == false,
+              "An inactive hidden Home rejects delayed removal actions")
+        grid.configure(accounts: samples, pinnedID: nil, enabled: true)
+        check(minus?.isHidden == true, "Normal Home hides the extra minus controls")
+        check(editCard.isAccessibilityElement() && editCard.accessibilityRole() == .button,
+              "Leaving edit mode restores each card's accessible button semantics")
+        grid.remove("unknown-provider")
+        check(removals == ["codex"], "An obsolete identity cannot remove a different card")
         window.orderOut(nil)
         guard failures == 0 else { exit(1) }
         print("PASS: \(checks) native card pointer, cancellation, refresh, scrolling and keyboard checks")
