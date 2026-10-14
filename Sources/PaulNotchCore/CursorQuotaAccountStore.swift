@@ -237,11 +237,17 @@ import Combine
         guard confirming else { isDisconnectConfirmationPresented = true; return }
         guard isDisconnectConfirmationPresented else { return }
         cancelDisconnect()
+        // Commit the disconnected state only after secure deletion succeeds.
+        // A locked vault must leave a usable connection and visible retry,
+        // matching custom-API removal rather than stranding saved credentials.
+        do { try vault.delete() }
+        catch {
+            loginError = "本机登录凭证未能移除，连接已保留；请重试断开。"
+            return
+        }
         stop(); enabled = false; states = [:]; needsAuthorization = false; keychainBlocked = false; loginError = nil
         modelMonitor.setEnabled(false)
-        guard allowsConnections else { return }
         defaults.set(false, forKey: Self.enabledKey)
-        do { try vault.delete() } catch { loginError = "已停止同步；本机登录凭证未能移除，请重试断开。" }
     }
     func cancelDisconnect() { isDisconnectConfirmationPresented = false }
     func stop() {

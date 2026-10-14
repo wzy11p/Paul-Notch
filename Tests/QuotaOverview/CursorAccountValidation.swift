@@ -8,6 +8,8 @@ import Foundation
     var saves = 0
     var refreshSaves = 0
     var deniesRefreshSave = false
+    var deniesDelete = false
+    var deletionAttempts = 0
     func read() throws -> String? { reads += 1; if denied { throw QuotaConnectionError.keychain }; return key }
     func readForAuthorization() throws -> String? { authorizations += 1; return key }
     func save(_ value: String) throws { saves += 1; key = value }
@@ -16,7 +18,11 @@ import Foundation
         if deniesRefreshSave { throw QuotaConnectionError.keychain }
         key = value
     }
-    func delete() throws { key = nil }
+    func delete() throws {
+        deletionAttempts += 1
+        if deniesDelete { throw QuotaConnectionError.keychain }
+        key = nil
+    }
 }
 
 private actor CursorTestTransport {
@@ -178,11 +184,23 @@ private actor CursorTestTransport {
         store.disconnect()
         check(store.enabled && vault.key != nil && store.isDisconnectConfirmationPresented,
               "Repeated first clicks never confirm deletion")
+        let savedBeforeFailedRemoval = vault.key
+        vault.deniesDelete = true
+        store.disconnect(confirming: true)
+        check(store.enabled && vault.key == savedBeforeFailedRemoval && store.loginError != nil &&
+              !store.isDisconnectConfirmationPresented && vault.deletionAttempts == 1,
+              "A failed secure deletion must retain the connected state and visible retry controls, not report a false disconnect")
+        store.disconnect(confirming: true)
+        check(vault.deletionAttempts == 1, "Retrying deletion still requires a fresh confirmation")
+        vault.deniesDelete = false
+        store.disconnect()
         store.disconnect(confirming: true)
         await settle(store)
         try await Task.sleep(for: .milliseconds(140))
         check(!store.enabled && vault.key == nil && store.account(.cursor, now: clock.now).value == .unknown,
               "Disconnect rejects late quota/login results and cannot recreate credentials")
+        check(vault.deletionAttempts == 2 && store.loginError == nil,
+              "A confirmed retry succeeds after the vault unlocks and clears the prior error")
         store.stop()
         let isolated = CursorQuotaAccountStore(defaults: defaults, vault: vault, allowsConnections: false,
             transport: { try await transport.fetch($0) }, clock: { clock.now })
