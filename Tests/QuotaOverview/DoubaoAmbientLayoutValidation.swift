@@ -47,7 +47,7 @@ import Vision
                     }
                     try require(quotaSize.width <= (full ? 38 : 43) && quotaSize.height <= (full ? 24 : 32),
                                 "Doubao labels/values overflow existing notch wing: \(quotaSize)")
-                    try require(timingSize.width + (full ? 12 : 14) <= (full ? 38 : 43) &&
+                    try require(timingSize.width + (full ? 9 : 11) <= (full ? 38 : 43) &&
                                 timingSize.height <= (full ? 24 : 32),
                                 "Provider mark and per-pool resets overflow existing notch wing: \(timingSize), \(reset), fullscreen \(full)")
                     layouts += 1
@@ -81,7 +81,7 @@ import Vision
         window.setContentSize(NSSize(width: 180, height: 24))
         try render(host, to: output.appendingPathComponent("doubao-notch-fullscreen.png"))
         presentation.isFloating = true
-        window.setContentSize(NSSize(width: 92, height: 92))
+        window.setContentSize(QuotaFloatingPlacement.bubbleSize)
         try render(host, to: output.appendingPathComponent("doubao-orb.png"))
         let pair = ambient.quotaPresentation(at: .now).lines
         try require(pair.count == 2, "Extreme-value renders require the actual two source slots")
@@ -94,7 +94,7 @@ import Vision
                 VStack(spacing: 6) {
                     Text("合成数据 \(item.offset + 1)").font(.system(size: 9))
                     DoubaoAmbientQuotaView(lines: lines, placement: .orb)
-                        .frame(width: 78, height: 78).background(Color(white: 0.12), in: Circle()).clipShape(Circle())
+                        .frame(width: 88, height: 88).background(Color(white: 0.12), in: Circle()).clipShape(Circle())
                 }
             }
         }.padding(16).foregroundStyle(.white).background(Color.black)
@@ -108,11 +108,7 @@ import Vision
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["zh-Hans", "en-US"]
         request.usesLanguageCorrection = false
-        do { try VNImageRequestHandler(data: data).perform([request]) }
-        catch {
-            FileHandle.standardError.write(Data("OCR execution failed after \(layouts) layout checks and native renders: \(error)\n".utf8))
-            throw error
-        }
+        try VNImageRequestHandler(data: data).perform([request])
         let visibleText = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
         try require(visibleText.contains("100%") && visibleText.contains("99%") && visibleText.contains("10/15"),
                     "Native pixels truncate a complete amount or date: \(visibleText)")

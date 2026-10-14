@@ -65,6 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let workspaceNavigation = WorkspaceNavigation()
     private let workspaceGeometry = WorkspacePanelGeometry(defaults: AppEnvironment.defaults)
     private let floatingPlacement = QuotaFloatingPlacement(defaults: AppEnvironment.defaults)
+    private let dockReturnMotion = QuotaDockReturnMotion()
     private let ambientPresentation = AmbientNotchPresentation()
     private lazy var reminderScheduler = TaskReminderScheduler { [weak self] in
         self?.store.tasks ?? []
@@ -91,6 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var globalHotKey: GlobalHotKey?
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
+    private var menuBarYield: MenuBarYieldController?
     private let workspaceMotion = WorkspacePanelMotion()
     private var isAnimatingIn: Bool { workspaceMotion.direction == .opening }
     private var isAnimatingOut: Bool { workspaceMotion.direction == .closing }
@@ -122,6 +124,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         workspaceNavigation.onLayoutChange = { [weak self] in self?.resizeWorkspaceForCurrentPage() }
         showAmbientPanel(on: preferredAmbientScreen())
         setupMenuBar()
+        menuBarYield = MenuBarYieldController(ambient: ambientPanel, workspace: panel) { [weak self] in
+            guard let self, let screen = self.ambientPanel.screen ?? self.preferredAmbientScreen() else { return nil }
+            return .init(enabled: !self.floatingPlacement.isFloating && !self.presentationModeEnabled
+                            && !self.dockReturnMotion.isRunning,
+                         screenFrame: screen.frame,
+                         menuHeight: max(screen.safeAreaInsets.top, screen.frame.maxY - screen.visibleFrame.maxY),
+                         workspaceAcceptsInput: self.panelPresentationMode == .workspace && !self.isAnimatingOut)
+        }
+        menuBarYield?.start()
         // Display/Space tracking belongs to the panel lifecycle in every profile.
         // Start it before the isolated-workspace return without enabling legacy services.
         startAmbientEnvironmentTracking()
@@ -187,6 +198,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        menuBarYield?.stop()
+        dockReturnMotion.cancel()
         workspaceMotion.cancel()
         presentationTrackingTimer?.invalidate()
         clipboardStore.stopMonitoring()
@@ -273,7 +286,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         workspaceHostingView.wantsLayer = true
         workspaceHostingView.layer?.backgroundColor = NSColor.clear.cgColor
         workspaceHostingView.layer?.cornerCurve = .continuous
-        workspaceHostingView.layer?.cornerRadius = IslandTheme.radiusPanel
+        // SwiftUI owns docked versus floating corners; a second four-corner
+        // backing-layer clip would cut a detached rounded lip into the notch.
         workspaceHostingView.layer?.masksToBounds = true
         workspaceHostingView.autoresizingMask = [.width, .height]
         drawerView = workspaceHostingView
@@ -487,6 +501,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func toggleAmbientClick() {
+        // Resolve the return before deriving pinned/docked click behavior.
+        dockReturnMotion.finishImmediately()
         guard let screen = ambientPanel.screen ?? preferredAmbientScreen() else { return }
         // Hover is artwork feedback only. Every deliberate click toggles the workspace.
         // Toggle the most recent intent, including a dismissal in flight.
@@ -503,6 +519,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showPanel(on screen: NSScreen) {
+        defer { menuBarYield?.refresh() }
+        dockReturnMotion.finishImmediately()
         let screen = floatingPlacement.preferredScreen(fallback: screen) ?? screen
         if presentationModeEnabled {
             layoutAmbientPanel(on: screen, animated: false)
@@ -517,7 +535,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelMetrics.isFloating = floatingPlacement.isFloating
         ambientPresentation.isFloating = floatingPlacement.isFloating
         panelMetrics.topInset = floatingPlacement.isFloating ? 0 : menuBarHeight + 4
-        drawerView.layer?.cornerRadius = workspaceNavigation.isQuotaHome ? 22 : IslandTheme.radiusPanel
         let savedFrame = workspaceGeometry.frame(navigation: workspaceNavigation,
             topInset: panelMetrics.topInset, screen: screen.frame)
         let targetFrame = floatingPlacement.isFloating
@@ -557,11 +574,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ambientPanel.orderOut(nil)
             return
         }
-        // Keep the real window in its final position. Only its clipped content
-        // moves, avoiding off-screen NSPanel frame constraints near the notch.
+        // Keep both the window and mounted content fixed. The silhouette grows
+        // out of the existing top notch rather than sliding a second card below.
         if !isReversingClose {
             panel.setFrame(targetFrame, display: false)
-            drawerView.frame = NSRect(origin: NSPoint(x: 0, y: size.height - 42), size: size)
+            drawerView.frame = NSRect(origin: .zero, size: size)
         }
         panel.ignoresMouseEvents = false
         panel.alphaValue = 1
@@ -570,7 +587,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ambientPanel.orderFrontRegardless()
         ambientPanel.order(.above, relativeTo: panel.windowNumber)
         startPointerTracking()
-        workspaceMotion.move(drawerView, to: .zero, direction: .opening) { [weak self] in
+        guard let container = panel.contentView as? WorkspacePanelContainer else { return }
+        let notch = ambientPanel.frame.offsetBy(dx: -panel.frame.minX, dy: -panel.frame.minY)
+        workspaceMotion.expand(container, from: notch, direction: .opening) { [weak self] in
             guard let self, self.panelPresentationMode == .workspace else { return }
             self.resizeWorkspaceForCurrentPage()
             self.checkPointer()
@@ -603,8 +622,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return
         }
-        workspaceMotion.move(drawerView, to: NSPoint(x: 0, y: panel.frame.height - 42),
-                             direction: .closing) { [weak self] in
+        guard let container = panel.contentView as? WorkspacePanelContainer else { return }
+        let notch = ambientPanel.frame.offsetBy(dx: -panel.frame.minX, dy: -panel.frame.minY)
+        workspaceMotion.expand(container, from: notch, direction: .closing) { [weak self] in
             guard let self, self.panelPresentationMode == .workspace else { return }
             self.store.requestMemoListReset()
             self.showAmbientPanel(
@@ -614,6 +634,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showAmbientPanel(on screen: NSScreen?) {
+        defer { menuBarYield?.refresh() }
         guard let screen = floatingPlacement.preferredScreen(fallback: screen) else { return }
         workspaceMotion.cancel()
         panelPresentationMode = .ambient
@@ -642,7 +663,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func layoutAmbientPanel(on screen: NSScreen?, animated: Bool) {
-        guard let screen else { return }
+        defer { menuBarYield?.refresh() }
+        guard !dockReturnMotion.isRunning, let screen else { return }
         let geometry = ambientGeometry(on: screen)
         ambientPresentation.centerGapWidth = geometry.centerGapWidth
         applyAmbientCornerMask()
@@ -683,8 +705,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let centerGapWidth: CGFloat
     }
 
-    private func ambientGeometry(on screen: NSScreen) -> AmbientGeometry {
-        if floatingPlacement.isFloating {
+    private func ambientGeometry(on screen: NSScreen, forceDocked: Bool = false) -> AmbientGeometry {
+        if floatingPlacement.isFloating && !forceDocked {
             let screen = floatingPlacement.preferredScreen(fallback: screen) ?? screen
             return AmbientGeometry(frame: floatingPlacement.bubbleFrame(on: screen), centerGapWidth: 0)
         }
@@ -698,22 +720,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ? centerGap + wingWidth * 2
             : (quotaCount > 1 ? 236 : 220)
         let width = min(unconstrainedWidth, screen.frame.width - 32)
-        let topInset = max(
-            screen.safeAreaInsets.top,
-            screen.frame.maxY - screen.visibleFrame.maxY
-        )
-        let topBandHeight = max(24, topInset)
-        let height: CGFloat = isFullScreen
-            ? min(24, topBandHeight)
-            : min(hasPhysicalNotch ? 32 : 28, topBandHeight)
+        let height: CGFloat = isFullScreen ? 24 : (hasPhysicalNotch ? 32 : 28)
         let x = screen.frame.midX - width / 2
-        // Attach directly to the display's top edge so the status surface reads
-        // as part of the hardware notch. Compact fixed wings reduce collisions
-        // with application menus and status items.
+        // One top-attached surface. Never introduce a menu-height offset or a
+        // second black connector to compensate for native window constraints.
         let y = screen.frame.maxY - height
         return AmbientGeometry(
             frame: NSRect(x: x, y: y, width: width, height: height),
-            centerGapWidth: min(centerGap, max(14, width - 100))
+            centerGapWidth: centerGap
         )
     }
 
@@ -838,13 +852,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return NSApp.windows.contains { $0.isVisible && $0.frame.contains(point) }
     }
 
-    private func handleLocalMouseDown(_ event: NSEvent) {
+    func handleLocalMouseDown(_ event: NSEvent) {
         // SwiftUI owns shelf taps. Handling mouse-down here too would toggle twice.
         if event.window === ambientPanel { return }
         // An event dispatched to our own window is not an outside click. Window
         // coordinates during a panel animation are not a reliable global hit test.
         if event.window != nil {
             if event.window === panel, panelPresentationMode == .workspace {
+                // The opaque expanded top now receives its own events. Preserve
+                // the same compact-notch toggle instead of letting that strip
+                // become a dead area after opening from a yielded menu bar.
+                let point = panel.convertPoint(toScreen: event.locationInWindow)
+                if event.type == .leftMouseDown, !floatingPlacement.isFloating,
+                   !presentationModeEnabled, !dockReturnMotion.isRunning,
+                   MenuBarYieldController.contains(point, band: ambientPanel.frame) {
+                    toggleAmbientClick()
+                    return
+                }
                 // A deliberate click inside the workspace leaves hover-preview
                 // mode: the next notch click must close, not merely pin, it.
                 isPinnedByHotKey = true
@@ -855,12 +879,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         handleMouseDown(event, at: NSEvent.mouseLocation)
     }
 
-    private func handleMouseDown(_ event: NSEvent, at pointer: NSPoint) {
+    func handleMouseDown(_ event: NSEvent, at pointer: NSPoint) {
         // An invisible trigger is observation-only: never steal clicks from another app.
         if presentationModeEnabled && !ambientPanel.isVisible && !panel.isVisible { return }
-        guard let screen = screenContainingMouse() ?? NSScreen.main else { return }
+        guard let screen = NSScreen.screens.first(where: {
+            MenuBarYieldController.contains(pointer, band: $0.frame)
+        }) else { return }
+
+        // Observe only the camera's actual occluded gap. Never enlarge this into
+        // usable menu space or create an invisible target on a notchless screen.
+        if event.type == .leftMouseDown, !presentationModeEnabled,
+           !floatingPlacement.isFloating, !dockReturnMotion.isRunning,
+           screen == ambientPanel.screen, screen.safeAreaInsets.top > 0,
+           let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea,
+           !left.isEmpty, !right.isEmpty, right.minX > left.maxX,
+           pointer.x >= left.maxX, pointer.x < right.minX,
+           pointer.y >= screen.frame.maxY - screen.safeAreaInsets.top {
+            toggleAmbientClick()
+            return
+        }
 
         if event.type == .leftMouseDown,
+           presentationModeEnabled,
            !floatingPlacement.isFloating,
            !ambientPanel.frame.contains(pointer),
            notchTrigger(on: screen).contains(pointer) {
@@ -903,8 +943,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func commitWorkspaceMove(_ frame: NSRect, on screen: NSScreen) {
+        defer { menuBarYield?.refresh() }
         let oldInset = panelMetrics.topInset
-        if QuotaFloatingPlacement.shouldDock(frame, on: screen.frame) { floatingPlacement.dock() }
+        if shouldDock(frame, on: screen) { floatingPlacement.dock() }
         else { floatingPlacement.detach(at: NSPoint(x: frame.midX, y: frame.maxY - 46), on: screen) }
         ambientPresentation.isFloating = floatingPlacement.isFloating
         panelMetrics.isFloating = floatingPlacement.isFloating
@@ -929,13 +970,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func commitBubbleMove(_ frame: NSRect, on screen: NSScreen) {
-        if QuotaFloatingPlacement.shouldDock(frame, on: screen.frame) { dockFloatingQuota(on: screen); return }
+        if shouldDock(frame, on: screen) {
+            dockFloatingQuota(on: screen); return
+        }
         floatingPlacement.detach(at: NSPoint(x: frame.midX, y: frame.midY), on: screen)
         layoutAmbientPanel(on: screen, animated: false)
     }
 
     private func dockFloatingQuota(on screen: NSScreen? = nil) {
-        guard let screen = screen ?? preferredAmbientScreen() else { return }
+        defer { menuBarYield?.refresh() }
+        guard !dockReturnMotion.isRunning, let screen = screen ?? preferredAmbientScreen() else { return }
+        if floatingPlacement.isFloating, panelPresentationMode == .ambient, ambientPanel.isVisible {
+            dockReturnMotion.start(ambientPanel, to: ambientGeometry(on: screen, forceDocked: true).frame) { [weak self] in
+                guard let self, let target = NSScreen.screens.first(where: { $0 === screen }) ?? NSScreen.main else { return }
+                self.completeFloatingDock(on: target)
+            }
+        } else { completeFloatingDock(on: screen) }
+    }
+
+    private func shouldDock(_ frame: NSRect, on screen: NSScreen) -> Bool {
+        QuotaFloatingPlacement.shouldDock(frame,
+            near: ambientGeometry(on: screen, forceDocked: true).frame,
+            reachableTop: screen.visibleFrame.maxY)
+    }
+
+    private func completeFloatingDock(on screen: NSScreen) {
         let oldInset = panelMetrics.topInset
         var restoredFrame = workspaceGeometry.frame(navigation: workspaceNavigation,
             topInset: oldInset, screen: screen.frame)
@@ -966,6 +1025,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePresentationMode() {
+        defer { menuBarYield?.refresh() }
         presentationModeEnabled.toggle()
         if AppEnvironment.ownedQuotaConnectionsEnabled { quotaResetReminders.isSuppressed = presentationModeEnabled }
         AppEnvironment.defaults.set(presentationModeEnabled, forKey: "presentation-mode-enabled-v1")
@@ -995,6 +1055,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func concealForPresentation() {
+        dockReturnMotion.cancel()
         Task { await noteStore.flushDraft() }
         workspaceMotion.cancel()
         isPinnedByHotKey = false
@@ -1140,7 +1201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quit() { NSApp.terminate(nil) }
 }
 
-final class IslandPanel: NSPanel {
+final class IslandPanel: ScreenTopPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
@@ -1167,7 +1228,7 @@ final class IslandPanel: NSPanel {
     }
 }
 
-final class AmbientPanel: NSPanel {
+final class AmbientPanel: ScreenTopPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }

@@ -6,7 +6,7 @@ import QuartzCore
 @MainActor final class WorkspacePanelContainer: NSView {
     let workspace: NSView
     let contentHolder = NSView()
-    fileprivate var isMorphing = false
+    var isMorphing = false
 
     init(workspace: NSView) {
         self.workspace = workspace
@@ -91,13 +91,13 @@ import QuartzCore
         container.layer?.addSublayer(shell)
         container.layer?.addSublayer(circle)
         setPose(opening ? local(bubbleFrame.insetBy(dx: 7, dy: 7)) : local(expandedFrame),
-                radius: opening ? 39 : 22, readingOpacity: opening ? 0 : 1,
+                radius: opening ? QuotaFloatingPlacement.orbDiameter / 2 : 22, readingOpacity: opening ? 0 : 1,
                 circleOpacity: opening ? 1 : 0, shadowOpacity: opening ? 0 : 0.22)
     }
 
     func animate(opening: Bool, duration: TimeInterval) {
         let destination = local(opening ? expandedFrame : bubbleFrame.insetBy(dx: 7, dy: 7))
-        let radius: CGFloat = opening ? 22 : 39
+        let radius: CGFloat = opening ? 22 : QuotaFloatingPlacement.orbDiameter / 2
         let timing = CAMediaTimingFunction(controlPoints: 0.22, 0.85, 0.24, 1)
         // The first pose was just prepared in a different window/anchor space;
         // its old AppKit presentation is not that pose. Only reversals sample it.

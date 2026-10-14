@@ -47,8 +47,9 @@ struct QuotaLiquidOrb: NSViewRepresentable {
     static func dismantleNSView(_ view: QuotaLiquidOrbView, coordinator: ()) { view.stop() }
 }
 
-/// One 78pt native glass backdrop and bounded vector disc. Waves, interior
-/// currents and finite drag response run in Core Animation, without a frame clock.
+/// One native glass backdrop. Finite particle-water motion updates a tiny
+/// alpha mask at 30 Hz; once flat, only four native bubbles and two soft currents
+/// animate in the compositor. Hidden/sleep/reduced-motion states stop both.
 @MainActor final class QuotaLiquidOrbView: NSView {
     private let glass = NSVisualEffectView()
     private let coating = NSView()
@@ -62,6 +63,7 @@ struct QuotaLiquidOrb: NSViewRepresentable {
     private let frontSurface = CALayer()
     private let cyanCurrent = CAGradientLayer()
     private let violetCurrent = CAGradientLayer()
+    private let bubbles = (0..<4).map { _ in CAShapeLayer() }
     private let gloss = CAGradientLayer()
     private let reflection = CAGradientLayer()
     private let depth = CAGradientLayer()
@@ -75,8 +77,10 @@ struct QuotaLiquidOrb: NSViewRepresentable {
     private var renderedBounds = CGRect.zero
     private var renderedLevel = QuotaLiquidLevel(value: nil)
     private var renderedTransparency: Bool?
-    private var slosh = QuotaOrbSlosh()
-    private var lastSloshRender = -Double.infinity
+    private let slosh = QuotaOrbSlosh()
+    private var simulationTimer: Timer?
+    var isSimulating: Bool { simulationTimer != nil }
+    var waterFlatBlend: Double { slosh.flatBlend }
     private var windowVisibilityObservation: NSKeyValueObservation?
 
     override init(frame: NSRect) {
@@ -86,7 +90,10 @@ struct QuotaLiquidOrb: NSViewRepresentable {
         glass.material = .hudWindow
         glass.blendingMode = .behindWindow
         glass.state = .active
-        glass.appearance = NSAppearance(named: .darkAqua)
+        glass.appearance = NSAppearance(named: .aqua)
+        // Slightly stronger system frost softens background detail without
+        // making the accepted light glass a dark HUD or adding another blur.
+        glass.alphaValue = 0.28
         glass.wantsLayer = true
         glass.layer?.masksToBounds = true
         addSubview(glass, positioned: .below, relativeTo: nil)
@@ -110,16 +117,24 @@ struct QuotaLiquidOrb: NSViewRepresentable {
         rearLiquid.mask = rearSurface; frontLiquid.mask = frontSurface
         // Both refractions share the front liquid's *real* quota mask, so they
         // cannot appear in the empty glass, including during a quota retarget.
-        for (current, tint) in [(cyanCurrent, NSColor(srgbRed: 0.42, green: 0.94, blue: 1, alpha: 0.38)),
-                                (violetCurrent, NSColor(srgbRed: 0.83, green: 0.58, blue: 1, alpha: 0.32))] {
+        for (current, tint) in [(cyanCurrent, NSColor(srgbRed: 0.42, green: 0.94, blue: 1, alpha: 0.22)),
+                                (violetCurrent, NSColor(srgbRed: 0.83, green: 0.58, blue: 1, alpha: 0.18))] {
             current.type = .radial
             current.colors = [tint.cgColor, tint.withAlphaComponent(0.08).cgColor, NSColor.clear.cgColor]
             current.locations = [0, 0.45, 1]
             current.startPoint = CGPoint(x: 0.5, y: 0.5); current.endPoint = CGPoint(x: 1, y: 1)
             frontLiquid.addSublayer(current)
         }
+        for (index, bubble) in bubbles.enumerated() {
+            bubble.name = "quota-liquid-bubble-\(index)"
+            bubble.fillColor = NSColor.white.withAlphaComponent(0.12).cgColor
+            bubble.strokeColor = NSColor(srgbRed: 0.72, green: 0.95, blue: 1, alpha: 0.54).cgColor
+            bubble.lineWidth = 0.45
+            bubble.opacity = 0
+            frontLiquid.addSublayer(bubble)
+        }
         gloss.type = .radial
-        gloss.colors = [NSColor.white.withAlphaComponent(0.26).cgColor,
+        gloss.colors = [NSColor.white.withAlphaComponent(0.18).cgColor,
                         NSColor.white.withAlphaComponent(0.04).cgColor, NSColor.clear.cgColor]
         gloss.locations = [0, 0.55, 1]
         gloss.startPoint = CGPoint(x: 0.20, y: 0.9); gloss.endPoint = CGPoint(x: 0.95, y: 0.15)
@@ -130,7 +145,7 @@ struct QuotaLiquidOrb: NSViewRepresentable {
         reflection.startPoint = CGPoint(x: 0.5, y: 0.5); reflection.endPoint = CGPoint(x: 1, y: 1)
         reflection.transform = CATransform3DMakeRotation(.pi / 7, 0, 0, 1)
         depth.type = .radial
-        depth.colors = [NSColor.clear.cgColor, NSColor.clear.cgColor, NSColor.black.withAlphaComponent(0.26).cgColor]
+        depth.colors = [NSColor.clear.cgColor, NSColor.clear.cgColor, NSColor.black.withAlphaComponent(0.10).cgColor]
         depth.locations = [0, 0.56, 1]
         depth.startPoint = CGPoint(x: 0.44, y: 0.60); depth.endPoint = CGPoint(x: 1.02, y: 0.10)
         rim.fillColor = NSColor.clear.cgColor
@@ -154,6 +169,7 @@ struct QuotaLiquidOrb: NSViewRepresentable {
     func configure(level: QuotaLiquidLevel, reducedMotion: Bool) {
         guard !stopped else { return }
         self.level = level; self.reducedMotion = reducedMotion
+        slosh.configure(fraction: level.fraction)
         updateMaterial()
         updateGeometry()
         updateMotion()
@@ -199,10 +215,8 @@ struct QuotaLiquidOrb: NSViewRepresentable {
         let diameter = min(bounds.width, bounds.height)
         guard diameter > 0, bounds != renderedBounds || level != renderedLevel else { return }
         let resize = bounds != renderedBounds
-        if resize { cancelSlosh() }
-        let animateLevel = !resize && motionAllowed && renderedLevel.fraction != nil && level.fraction != nil
-        let fromRear = rearMask.presentation()?.path ?? rearMask.path
-        let fromFront = frontMask.presentation()?.path ?? frontMask.path
+        if resize { cancelSlosh(); stopMotion() }
+        if level != renderedLevel { bubbles.forEach { $0.removeAnimation(forKey: "quota-liquid-bubble") } }
         let diameterChanged = diameter != renderedSize
         renderedSize = diameter; renderedBounds = bounds; renderedLevel = level
         CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -218,7 +232,9 @@ struct QuotaLiquidOrb: NSViewRepresentable {
                 NSColor.white.setFill(); NSBezierPath(ovalIn: rect).fill(); return true
             }
         }
-        for surface in [backdrop, rearLiquid, frontLiquid, depth, gloss] { surface.frame = orb.bounds }
+        for surface in [backdrop, rearLiquid, frontLiquid, depth, gloss, rearSurface, frontSurface, rearMask, frontMask] {
+            surface.frame = orb.bounds
+        }
         cyanCurrent.bounds = CGRect(x: 0, y: 0, width: diameter * 1.02, height: diameter * 0.62)
         cyanCurrent.position = CGPoint(x: diameter * 0.35, y: diameter * 0.30)
         violetCurrent.bounds = CGRect(x: 0, y: 0, width: diameter * 0.8, height: diameter * 0.72)
@@ -228,53 +244,69 @@ struct QuotaLiquidOrb: NSViewRepresentable {
         let scale = window?.backingScaleFactor ?? 2
         [orb, backdrop, rearLiquid, frontLiquid, rearMask, frontMask, rearSurface, frontSurface, cyanCurrent, violetCurrent,
          depth, gloss, reflection, rim].forEach { $0.contentsScale = scale }
+        for (index, bubble) in bubbles.enumerated() {
+            let radius = diameter * [0.012, 0.016, 0.010, 0.014][index]
+            bubble.bounds = CGRect(x: 0, y: 0, width: radius * 2, height: radius * 2)
+            bubble.path = CGPath(ellipseIn: bubble.bounds, transform: nil)
+            bubble.contentsScale = scale
+        }
         rim.frame = orb.bounds
         rim.path = CGPath(ellipseIn: orb.bounds.insetBy(dx: 0.4, dy: 0.4), transform: nil)
-        for mask in [rearMask, frontMask] {
-            mask.frame = CGRect(x: -diameter, y: 0, width: diameter * 3, height: diameter)
-        }
-        for surface in [rearSurface, frontSurface] {
-            surface.bounds = orb.bounds
-            surface.anchorPoint = CGPoint(x: 0.5, y: 0)
-            surface.position = CGPoint(x: diameter / 2, y: 0)
-        }
-        rearMask.path = level.wavePath(diameter: diameter, phase: 0.7, amplitude: 1.6)
-        frontMask.path = level.wavePath(diameter: diameter, phase: 0, amplitude: 1.3)
         rearLiquid.opacity = level.fraction == nil || level.fraction == 0 ? 0 : 1
         frontLiquid.opacity = rearLiquid.opacity
         CATransaction.commit()
-        for (mask, from) in [(rearMask, fromRear), (frontMask, fromFront)] {
-            mask.removeAnimation(forKey: "quota-liquid-level")
-            if animateLevel, let from {
-                let animation = CABasicAnimation(keyPath: "path")
-                animation.fromValue = from; animation.toValue = mask.path
-                animation.duration = 0.45
-                animation.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.3, 1)
-                mask.add(animation, forKey: "quota-liquid-level")
+        renderWater()
+    }
+
+    private func renderWater() {
+        if slosh.flatBlend == 1 {
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            for mask in [rearMask, frontMask] {
+                mask.contents = nil
+                mask.path = level.wavePath(diameter: renderedSize, phase: 0, amplitude: 0)
             }
+            CATransaction.commit()
+            return
         }
-        if resize { stopMotion() }
-        else if motionAllowed {
-            // A real quota refresh can arrive mid-drag. Keep its input anchor
-            // and retarget the existing response to the new waterline limits.
-            let now = CACurrentMediaTime()
-            let response = slosh.sample(at: now)
-            if response.slope != 0 || response.velocity != 0 { renderSlosh(at: now) }
-        }
+        let n = QuotaParticleLiquid.fieldSize
+        let data = Data(slosh.maskRGBA())
+        guard let provider = CGDataProvider(data: data as CFData),
+              let image = CGImage(width: n, height: n, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: n * 4,
+                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent) else { return }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        rearMask.path = nil; frontMask.path = nil
+        rearMask.contents = image; frontMask.contents = image
+        CATransaction.commit()
     }
 
     private func updateMotion() {
         guard motionAllowed else { stopMotion(); return }
-        for (mask, duration, direction) in [(frontMask, 5.8, -1.0), (rearMask, 7.4, 1.0)] {
-            guard mask.animation(forKey: "quota-liquid-wave") == nil else { continue }
-            let animation = CABasicAnimation(keyPath: "transform.translation.x")
-            animation.fromValue = 0; animation.toValue = Double(renderedSize) * direction
-            animation.duration = duration; animation.repeatCount = .infinity
-            animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        for (index, bubble) in bubbles.enumerated() {
+            guard bubble.animation(forKey: "quota-liquid-bubble") == nil else { continue }
+            let d = renderedSize
+            let x = d * [0.28, 0.46, 0.64, 0.75][index]
+            let height = d * max(0.12, level.fraction ?? 0)
+            let rise = CAKeyframeAnimation(keyPath: "position")
+            rise.values = [CGPoint(x: x, y: d * 0.05),
+                CGPoint(x: x + d * 0.025, y: height * 0.4),
+                CGPoint(x: x - d * 0.018, y: height * 0.72),
+                CGPoint(x: x + d * 0.01, y: height + d * 0.02)].map { NSValue(point: $0) }
+            rise.keyTimes = [0, 0.35, 0.7, 1]
+            rise.calculationMode = .cubic
+            let fade = CAKeyframeAnimation(keyPath: "opacity")
+            fade.values = [0, 0.8, 0.65, 0]
+            fade.keyTimes = [0, 0.14, 0.80, 1]
+            let group = CAAnimationGroup()
+            group.duration = [4.8, 6.1, 5.5, 7.0][index]
+            rise.duration = group.duration; fade.duration = group.duration
+            group.animations = [rise, fade]; group.repeatCount = .infinity
             let now = CACurrentMediaTime()
-            animation.beginTime = mask.convertTime(now, from: nil) - (now - epoch).truncatingRemainder(dividingBy: duration)
-            mask.add(animation, forKey: "quota-liquid-wave")
+            group.beginTime = bubble.convertTime(now, from: nil) -
+                (now - epoch + Double(index) * 1.37).truncatingRemainder(dividingBy: group.duration)
+            bubble.add(group, forKey: "quota-liquid-bubble")
         }
+        startSimulationIfNeeded()
         for (current, duration, direction) in [(cyanCurrent, 8.5, 1.0), (violetCurrent, 11.0, -1.0)] {
             guard current.animation(forKey: "quota-liquid-current") == nil else { continue }
             let origin = current.position, dx = renderedSize * 0.13 * direction, dy = renderedSize * 0.10
@@ -292,12 +324,35 @@ struct QuotaLiquidOrb: NSViewRepresentable {
         }
     }
     private func stopMotion() {
-        cancelSlosh()
-        for mask in [rearMask, frontMask] {
-            mask.removeAnimation(forKey: "quota-liquid-wave")
-            mask.removeAnimation(forKey: "quota-liquid-level")
-        }
+        simulationTimer?.invalidate(); simulationTimer = nil
+        slosh.suspend()
         [cyanCurrent, violetCurrent].forEach { $0.removeAnimation(forKey: "quota-liquid-current") }
+        bubbles.forEach { $0.removeAnimation(forKey: "quota-liquid-bubble") }
+        if reducedMotion || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ||
+            ProcessInfo.processInfo.isLowPowerModeEnabled {
+            slosh.cancel(); renderWater()
+        }
+    }
+    private func startSimulationIfNeeded() {
+        guard motionAllowed, slosh.isEvolving, simulationTimer == nil else { return }
+        // Common mode includes native mouse tracking. The weak callback also
+        // invalidates itself if teardown releases the view before its next tick.
+        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] timer in
+            let keepRunning = MainActor.assumeIsolated {
+                guard let self else { return false }
+                guard self.motionAllowed else { self.stopMotion(); return false }
+                self.slosh.advance(to: CACurrentMediaTime())
+                self.renderWater()
+                if !self.slosh.isEvolving {
+                    self.simulationTimer = nil
+                }
+                return self.slosh.isEvolving
+            }
+            if !keepRunning { timer.invalidate() }
+        }
+        timer.tolerance = 0.003
+        simulationTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
     private func updateMaterial() {
         let opaque = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
@@ -305,51 +360,38 @@ struct QuotaLiquidOrb: NSViewRepresentable {
         renderedTransparency = opaque
         CATransaction.begin(); CATransaction.setDisableActions(true)
         glass.isHidden = opaque
-        backdrop.colors = [color(0.24, 0.28, 0.36, opaque ? 1 : 0.38),
-            color(0.095, 0.12, 0.19, opaque ? 1 : 0.28), color(0.04, 0.055, 0.10, opaque ? 1 : 0.52)]
-        rearLiquid.colors = [color(0.30, 0.65, 0.82, 0.65), color(0.44, 0.29, 0.68, 0.68)]
-        frontLiquid.colors = [color(0.10, 0.50, 0.73, 0.68), color(0.20, 0.37, 0.68, 0.70),
-            color(0.39, 0.22, 0.62, 0.75)]
+        backdrop.colors = [color(0.24, 0.28, 0.36, opaque ? 1 : 0.05),
+            color(0.095, 0.12, 0.19, opaque ? 1 : 0.04), color(0.04, 0.055, 0.10, opaque ? 1 : 0.08)]
+        // Lift pigment luminance rather than stacking more opacity. Cyan-blue
+        // water stays visible over dark windows, with the same transmission
+        // and bounded masks; the reading support is behind this layer.
+        rearLiquid.colors = [color(0.10, 0.75, 1, 0.12), color(0.32, 0.52, 0.98, 0.14)]
+        frontLiquid.colors = [color(0.10, 0.72, 1, 0.28), color(0.12, 0.60, 0.98, 0.30),
+            color(0.34, 0.52, 0.98, 0.34)]
         CATransaction.commit()
     }
-    func beginDrag(x: Double, at time: Double) {
-        guard motionAllowed else { cancelSlosh(); return }
-        slosh.begin(x: x, at: time)
+    private func normalized(_ point: CGPoint) -> SIMD2<Double> {
+        // AppKit screen coordinates are y-up; the water solver is y-down.
+        SIMD2(Double(point.x / max(1, renderedSize)), -Double(point.y / max(1, renderedSize)))
     }
-    func moveDrag(x: Double, at time: Double) {
-        guard motionAllowed else { cancelSlosh(); return }
-        guard slosh.move(x: x, at: time), time - lastSloshRender >= 1.0 / 30 else { return }
-        renderSlosh(at: time)
+    func beginDrag(position: CGPoint, at time: Double) {
+        guard motionAllowed else { return }
+        slosh.begin(position: normalized(position), at: time)
+    }
+    func moveDrag(position: CGPoint, at time: Double) {
+        guard motionAllowed else { return }
+        slosh.move(position: normalized(position), at: time)
+        startSimulationIfNeeded()
     }
     func endDrag(at time: Double) {
-        guard motionAllowed else { cancelSlosh(); return }
-        if slosh.end(at: time) { renderSlosh(at: time) }
+        guard motionAllowed else { return }
+        slosh.end(at: time)
+        startSimulationIfNeeded()
     }
     func cancelSlosh() {
-        slosh.cancel(); lastSloshRender = -.infinity
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        for surface in [rearSurface, frontSurface] {
-            surface.removeAnimation(forKey: "quota-liquid-slosh")
-            surface.transform = CATransform3DIdentity
-        }
-        CATransaction.commit()
-    }
-    private func renderSlosh(at time: Double) {
-        guard let fraction = level.fraction else { return }
-        lastSloshRender = time
-        let limit = min(0.30, min(fraction, 1 - fraction) * 1.5)
-        for (surface, lag) in [(frontSurface, 1.0), (rearSurface, 0.78)] {
-            let animation = CAKeyframeAnimation(keyPath: "transform")
-            animation.values = (0...48).map { index in
-                let slope = min(limit, max(-limit, slosh.sample(at: time + Double(index) / 24).slope)) * lag
-                var transform = CATransform3DIdentity; transform.m12 = slope
-                return NSValue(caTransform3D: transform)
-            }
-            animation.duration = 2
-            animation.calculationMode = .linear
-            animation.isRemovedOnCompletion = true
-            surface.add(animation, forKey: "quota-liquid-slosh")
-        }
+        simulationTimer?.invalidate(); simulationTimer = nil
+        slosh.cancel()
+        if renderedSize > 0 { renderWater() }
     }
     private func color(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat, _ alpha: CGFloat = 1) -> CGColor {
         NSColor(srgbRed: red, green: green, blue: blue, alpha: alpha).cgColor

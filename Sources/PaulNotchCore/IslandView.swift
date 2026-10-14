@@ -143,18 +143,19 @@ struct IslandView: View {
     var body: some View {
         ZStack(alignment: .top) {
             if navigation.isQuotaHome {
-                QuotaPanelBackdrop()
+                QuotaPanelBackdrop(isDocked: !panelMetrics.isFloating)
                 if !panelMetrics.isFloating {
                     QuotaDockedTopBlend(topInset: panelMetrics.topInset)
                         .frame(maxHeight: .infinity, alignment: .top)
                 }
             } else {
-                RoundedRectangle(cornerRadius: IslandTheme.radiusPanel, style: .continuous)
+                WorkspaceSurfaceShape(isDocked: !panelMetrics.isFloating, radius: IslandTheme.radiusPanel)
                     .fill(IslandTheme.background)
             }
-            // 四角使用同一条连续曲线，让展开态仍像一个完整的 macOS 浮层。
-            RoundedRectangle(cornerRadius: navigation.isQuotaHome ? 22 : IslandTheme.radiusPanel, style: .continuous)
-                .stroke(IslandTheme.hairline, lineWidth: 1)
+            if panelMetrics.isFloating {
+                WorkspaceSurfaceShape(isDocked: false, radius: navigation.isQuotaHome ? 22 : IslandTheme.radiusPanel)
+                    .stroke(IslandTheme.hairline, lineWidth: 1)
+            }
 
             VStack(spacing: IslandTheme.s3) {
                 if navigation.isQuotaHome {
@@ -220,6 +221,8 @@ struct IslandView: View {
             .frame(maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipShape(WorkspaceSurfaceShape(isDocked: !panelMetrics.isFloating,
+                                        radius: navigation.isQuotaHome ? 22 : IslandTheme.radiusPanel))
         .overlay(alignment: .top) {
             WorkspaceWindowGrip(kind: .move,
                                 minimumSize: navigation.layoutKey == "quota" ? QuotaHomeLayout.minimumSize : NSSize(width: 480, height: 320),

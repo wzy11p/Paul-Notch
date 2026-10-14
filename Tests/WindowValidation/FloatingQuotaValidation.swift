@@ -92,7 +92,7 @@ import QuartzCore
         try require(readingFadedBeforeCircle,
                     "reading text disappears before the housing becomes tiny, rather than remaining squeezed inside")
         settle(0.55)
-        try require(ambient.isVisible && !workspace.isVisible && ambient.frame.width <= 100 && ambient.frame.height <= 100,
+        try require(ambient.isVisible && !workspace.isVisible && ambient.frame.size == NSSize(width: 92, height: 92),
                     "a detached workspace collapses into a small circle instead of returning to the notch")
         try require(abs(ambient.frame.midX - detached.midX) < 2 && ambient.frame.midY < before.maxY - 100,
                     "collapse retains the owner's detached position")
@@ -174,6 +174,7 @@ import QuartzCore
         try require(abs(workspace.frame.width - chosenFloatingSize.width) < 1 &&
                     abs(workspace.frame.height - host.rootView.panelMetrics.topInset - chosenFloatingSize.height) < 1,
                     "returning the circle to the notch preserves chosen dimensions instead of resetting every route")
+        print("Returned workspace frame: \(workspace.frame), screen: \(screen.frame)")
         try require(abs(workspace.frame.midX - screen.frame.midX) < 0.5 &&
                     abs(workspace.frame.maxY - screen.frame.maxY) < 0.5,
                     "circle docking also restores the exact hardware center and top")

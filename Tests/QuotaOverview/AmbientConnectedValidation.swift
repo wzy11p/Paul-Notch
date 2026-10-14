@@ -101,7 +101,7 @@ private actor AmbientFixtureTransport {
         cursor.refreshDue(); doubao.beginLogin(); doubao.finishLogin()
         await settle(cursor, doubao)
         for (bundle, expected, period) in [
-            ("com.todesktop.230313mzl4w4u92", 81, "内28D"),
+            ("com.todesktop.230313mzl4w4u92", 81, "28D"),
             ("com.anysphere.sand", 64, "3D"), ("com.work.pc.doubao", 87, "2H")
         ] {
             presentation.observeForeground(bundleIdentifier: bundle)
@@ -122,8 +122,10 @@ private actor AmbientFixtureTransport {
             await modelSource.select(label)
             modelMonitor.signalChange()
             try await Task.sleep(for: .milliseconds(1050))
-            let values = view.quotaPresentation(at: clock.now).lines.map(\.value)
-            try check(values == expected.map(QuotaOverviewValue.percent), "model changes select the canonical pool without another quota fetch")
+            let selected = view.quotaPresentation(at: clock.now)
+            try check(selected.lines.map(\.value) == [.percent(81), .percent(50)] &&
+                      selected.liquidValue == (expected.count == 1 ? .percent(expected[0]) : nil),
+                      "model changes highlight the canonical pool without removing another balance or fetching quota")
         }
         presentation.observeForeground(bundleIdentifier: "com.openai.codex")
         modelMonitor.observeForeground(bundleIdentifier: "com.google.Chrome", pid: 999999)
@@ -132,7 +134,8 @@ private actor AmbientFixtureTransport {
             modelMonitor.signalChange()
             try await Task.sleep(for: .milliseconds(1050))
             let selected = view.quotaPresentation(at: clock.now)
-            try check(selected.service == .cursor && selected.lines.map(\.value) == expected.map(QuotaOverviewValue.percent) &&
+            try check(selected.service == .cursor && selected.lines.map(\.value) == [.percent(81), .percent(50)] &&
+                      selected.liquidValue == (expected.count == 1 ? .percent(expected[0]) : nil) &&
                       selected.activity == .notAvailable,
                       "Verified Cursor web must replace retained Codex identity and select only canonical Cursor pools")
         }

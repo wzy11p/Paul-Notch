@@ -44,3 +44,12 @@ jobs:
           zsh scripts/test-quota-connections.sh
           swiftc -swift-version 6 -parse-as-library Sources/PaulNotchCore/QuotaConnectionModels.swift Sources/PaulNotchCore/QuotaResetReminderPolicy.swift Tests/QuotaOverview/QuotaResetNoticeValidation.swift -o "$RUNNER_TEMP/reset-policy"
           "$RUNNER_TEMP/reset-policy"
+      - name: Build 124 quota and water regressions
+        run: |
+          zsh scripts/test-cursor-account.sh
+          swiftc -O -DQUOTA_WATER_CHECKS Sources/PaulNotchCore/QuotaParticleLiquid.swift Sources/PaulNotchCore/QuotaOrbSlosh.swift Tests/WindowValidation/QuotaParticleWaterValidation.swift -o "$RUNNER_TEMP/particle-water"
+          "$RUNNER_TEMP/particle-water"
+      - name: Lossless release packaging
+        run: |
+          zsh scripts/build-app.sh --adhoc
+          zsh scripts/test-release-package.sh

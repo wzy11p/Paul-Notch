@@ -112,6 +112,61 @@ struct QuotaOverviewAccount: Identifiable, Equatable {
 
 enum QuotaOverviewMode { case preview, notch }
 
+/// Shared reading vocabulary, not another source or a guessed deadline.
+enum QuotaGlanceText {
+    static func compactPool(_ label: String) -> String {
+        switch label {
+        case "Cursor": "C"
+        case "其他": "O"
+        case "时段": "S"
+        case "总额": "T"
+        case "剩余": "R"
+        default: label
+        }
+    }
+
+    static func compactCountdown(_ token: String) -> String {
+        if token == "待用" { return "P" }
+        if token == "待刷新" { return "…" }
+        return countdown(token) == "时间待确认" ? "—" : token
+    }
+
+    static func modelMark(_ label: String) -> String? {
+        // Keep known ambiguous G-model names distinct, not one guessed G.
+        let marks = [("Sonnet", "S"), ("Opus", "O"), ("Haiku", "H"), ("Fable", "F"),
+                     ("Grok", "G"), ("Composer", "C"), ("GPT", "GPT"), ("Gemini", "Ge"), ("Muse", "M")]
+        return marks.first { label == $0.0 || label.hasPrefix($0.0 + " ") }?.1
+    }
+
+    static func poolLabel(provider: String, label: String, sourceID: String? = nil) -> String {
+        switch (provider, sourceID ?? label) {
+        case ("doubao", "doubao.short"), ("doubao", "当前时段"), ("codex", "5 小时"): return "时段"
+        case ("doubao", "doubao.weekly"), ("doubao", "近 7 天"), ("codex", "每周"): return "总额"
+        case ("cursor", "Cursor Models"), ("cursor", "Cursor"): return "Cursor"
+        case ("cursor", "Other Models"), ("cursor", "其他模型"): return "其他"
+        default: return label
+        }
+    }
+
+    static func countdown(_ token: String) -> String {
+        if token == "待用" { return "未计时" }
+        if token == "待刷新" { return "待更新" }
+        let units: [Character: String] = ["D": "天", "H": "时", "M": "分"]
+        guard let suffix = token.last, let unit = units[suffix] else { return "时间待确认" }
+        let prefix = String(token.dropLast()), bound = prefix.hasPrefix("<")
+        let number = bound ? String(prefix.dropFirst()) : prefix
+        guard let amount = Int(number), (1...366).contains(amount) else { return "时间待确认" }
+        return "\(amount)\(unit)\(bound ? "内" : "后")重置"
+    }
+
+    static func timing(_ text: String) -> String {
+        if text == "开始使用后计时" { return "未计时" }
+        if text.contains("等待确认重置") || text.contains("等待官方返回重置") { return "待更新" }
+        return text.replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "小时", with: "时").replacingOccurrences(of: "分钟", with: "分")
+    }
+}
+
 struct QuotaOverviewTool: Identifiable {
     let id: String
     let title: String

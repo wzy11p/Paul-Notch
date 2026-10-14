@@ -50,6 +50,39 @@ import SwiftUI
         host.rootView.onCloseWorkspace()
         settle()
         try require(!workspace.isVisible && shelf.isVisible, "Collapse keeps the real quota shelf visible")
+        func checkAttachment() throws {
+            guard let screen = shelf.screen else { throw Failure(description: "Missing display") }
+            try require(abs(shelf.frame.maxY - screen.frame.maxY) < 0.5,
+                        "The readout itself must touch the physical top, without a separate black bridge")
+            if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
+                try require(ambient.rootView.presentation.centerGapWidth >= right.minX - left.maxX,
+                            "All readout glyphs must stay outside the camera gap")
+            }
+            try require(app.windows.filter { $0 is ScreenTopPanel }.count == 2,
+                        "Only the existing workspace and ambient surfaces are needed")
+        }
+        try checkAttachment()
+        // Context fixture, not a desktop screenshot: actual mounted shelf pixels
+        // and actual window frames over a plain background. Include the top edge
+        // so a visually detached shelf cannot hide inside a tight window crop.
+        if let screen = shelf.screen, CommandLine.arguments.count > 1,
+           let raster = ambient.bitmapImageRepForCachingDisplay(in: ambient.bounds) {
+            ambient.cacheDisplay(in: ambient.bounds, to: raster)
+            let contextSize = NSSize(width: 600, height: 100)
+            let composite = NSImage(size: contextSize)
+            composite.lockFocus()
+            NSColor(calibratedRed: 0.18, green: 0.48, blue: 0.67, alpha: 1).setFill()
+            NSRect(origin: .zero, size: contextSize).fill()
+            let offset = NSPoint(x: contextSize.width / 2 - screen.frame.midX,
+                                 y: contextSize.height - screen.frame.maxY)
+            raster.draw(in: shelf.frame.offsetBy(dx: offset.x, dy: offset.y))
+            composite.unlockFocus()
+            if let data = composite.tiffRepresentation,
+               let png = NSBitmapImageRep(data: data)?.representation(using: .png, properties: [:]) {
+                try png.write(to: URL(fileURLWithPath: CommandLine.arguments[1])
+                    .appendingPathComponent("native-top-context-fixture.png"))
+            }
+        }
         try require(ambient.rootView.codexStatus.quota == nil, "No synthetic quota is inserted")
         try require(!host.rootView.notifyServer.isRunning, "Isolation must not start the notification server")
         try require(value("globalHotKey", in: delegate, as: GlobalHotKey.self) == nil,
@@ -57,6 +90,14 @@ import SwiftUI
         try require(value("monitorTimer", in: host.rootView.clipboardStore, as: Timer.self) == nil,
                     "Fresh preview must not start clipboard capture")
         print("PASS: isolated startup keeps background services off and quota unknown")
+
+        ambient.rootView.onOpen()
+        settle()
+        try require(workspace.isVisible && shelf.isVisible && shelf.level.rawValue > workspace.level.rawValue,
+                    "Expanded workspace must not occlude its own quota shelf")
+        try checkAttachment()
+        host.rootView.onCloseWorkspace()
+        settle()
 
         let events: [(String, NotificationCenter, Notification.Name)] = [
             ("screen parameters", .default, NSApplication.didChangeScreenParametersNotification),
@@ -72,12 +113,15 @@ import SwiftUI
             settle()
             try require(shelf.frame != stale, "\(label): stale shelf geometry was never refreshed")
             guard let screen = shelf.screen else { throw Failure(description: "Shelf has no screen") }
-            try require(abs(shelf.frame.maxY - screen.frame.maxY) < 1,
-                        "\(label): shelf must attach to the current display top")
+            try require(abs(shelf.frame.maxY - screen.frame.maxY) < 0.5,
+                        "\(label): readout must retain its original physical-top anchor")
+            try require(shelf.level.rawValue > workspace.level.rawValue,
+                        "\(label): the workspace must not cover its own readout")
             try require(abs(shelf.frame.midX - screen.frame.midX) < 1,
                         "\(label): shelf must recenter on its display")
             try require(shelf.isVisible && !workspace.isVisible,
                         "\(label): refresh must retain collapsed state")
+            try checkAttachment()
 
             // Invalidate the cached full-screen flag, then check the same environment
             // produces the previous state. This verifies recomputation, not a real OS
