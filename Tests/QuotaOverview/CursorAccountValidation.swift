@@ -29,6 +29,12 @@ private actor CursorTestTransport {
     var rotationStatus = 200
     var pollStatus = 200
     var retryAfter: TimeInterval?
+    var malformedUsage = false
+    var quotaStatus: Int?
+    func setQuotaOutage(_ status: Int?, retryAfter: TimeInterval? = nil) {
+        quotaStatus = status; self.retryAfter = retryAfter
+    }
+    func setMalformedUsage(_ value: Bool) { malformedUsage = value }
     func configure(used: Double, failure: String? = nil, status: Int = 500, delayed: Bool = false) {
         self.used = used; self.failure = failure; self.status = status; self.delayed = delayed
     }
@@ -43,6 +49,7 @@ private actor CursorTestTransport {
         let capturedStatus: Int
         if path == "/auth/poll" { capturedStatus = pollStatus }
         else if path == "/oauth/token" { capturedStatus = rotationStatus }
+        else if let quotaStatus { capturedStatus = quotaStatus }
         else if requiresRotation && request.value(forHTTPHeaderField: "Authorization") != "Bearer rotated-test-access" { capturedStatus = 401 }
         else { capturedStatus = path == failure ? status : 200 }
         if delayed { try? await Task.sleep(for: .milliseconds(100)) }
@@ -51,6 +58,8 @@ private actor CursorTestTransport {
             payload = #"{"accessToken":"test-access-token","refreshToken":"test-refresh-token"}"#
         } else if path == "/oauth/token" {
             payload = #"{"access_token":"rotated-test-access","refresh_token":"rotated-test-refresh"}"#
+        } else if malformedUsage {
+            payload = #"{"newQuotaFormat":true}"#
         } else if path.hasSuffix("GetCurrentPeriodUsage") {
             payload = "{\"enabled\":true,\"billingCycleStart\":\"1790812800000\",\"billingCycleEnd\":\"1793491200000\",\"planUsage\":{\"autoPercentUsed\":\(capturedUsed),\"apiPercentUsed\":25}}"
         } else if path.hasSuffix("GetSandUsageStatus") {
@@ -159,6 +168,17 @@ private actor CursorTestTransport {
         await transport.configure(used: 63, delayed: true)
         for _ in 0..<10 { store.refreshDue(force: true) }
         store.disconnect()
+        check(store.enabled && vault.key != nil,
+              "The first disconnect click must only request confirmation and must not delete either service's login")
+        store.cancelDisconnect()
+        store.disconnect(confirming: true)
+        check(store.enabled && vault.key != nil && !store.isDisconnectConfirmationPresented,
+              "Cancel or a late confirmation cannot delete the saved connection")
+        store.disconnect()
+        store.disconnect()
+        check(store.enabled && vault.key != nil && store.isDisconnectConfirmationPresented,
+              "Repeated first clicks never confirm deletion")
+        store.disconnect(confirming: true)
         await settle(store)
         try await Task.sleep(for: .milliseconds(140))
         check(!store.enabled && vault.key == nil && store.account(.cursor, now: clock.now).value == .unknown,
@@ -169,6 +189,53 @@ private actor CursorTestTransport {
         let beforePreview = await transport.counts
         isolated.beginLogin(); isolated.refreshDue(force: true)
         check(await transport.counts == beforePreview && vault.key == nil, "Preview cannot log in or query live accounts")
+
+        // Successful owned authentication must survive a separate quota-format
+        // failure. Rejecting both quota payloads must NOT discard that login.
+        let pendingVault = CursorTestVault()
+        let pendingTransport = CursorTestTransport()
+        await pendingTransport.setMalformedUsage(true)
+        let pending = CursorQuotaAccountStore(defaults: defaults, vault: pendingVault, allowsConnections: true,
+            transport: { try await pendingTransport.fetch($0) }, clock: { clock.now })
+        pending.beginLogin(); await settleLogin(pending)
+        check(pending.enabled && pendingVault.key != nil && pendingVault.saves == 1,
+              "First successful official authentication is saved even when both quota parsers reject the response")
+        check(!pending.needsAuthorization && !pending.isLoggingIn && pending.loginURL == nil &&
+              pending.account(.cursor, now: clock.now).value == .unknown &&
+              pending.account(.grok, now: clock.now).status != .current,
+              "Retained login never invents a quota or claims it is current")
+        pending.stop()
+        let pendingCold = CursorQuotaAccountStore(defaults: defaults, vault: pendingVault, allowsConnections: true,
+            transport: { try await pendingTransport.fetch($0) }, clock: { clock.now })
+        let pendingPollCount = await pendingTransport.counts["/auth/poll"]
+        await pendingTransport.setMalformedUsage(false)
+        pendingCold.refreshDue(); await settle(pendingCold)
+        let pendingPollsAfterRestart = await pendingTransport.counts["/auth/poll"]
+        check(pendingCold.account(.cursor, now: clock.now).value == .percent(87) &&
+              pendingCold.account(.grok, now: clock.now).value == .percent(87) &&
+              pendingPollsAfterRestart == pendingPollCount,
+              "A retained login recovers quota after cold start without a second browser login")
+        let retainedKey = pendingVault.key
+        let retainedSaves = pendingVault.saves
+        await pendingTransport.setMalformedUsage(true)
+        pendingCold.beginLogin(); await settleLogin(pendingCold)
+        check(pendingVault.key == retainedKey && pendingVault.saves == retainedSaves && pendingCold.enabled &&
+              pendingCold.account(.cursor, now: clock.now).value == .percent(87),
+              "An unverified replacement still cannot overwrite the existing confirmed account")
+        pendingCold.stop()
+        defaults.set(false, forKey: "quota.cursor-account.enabled.v1")
+        let outageVault = CursorTestVault()
+        let outageTransport = CursorTestTransport()
+        await outageTransport.setQuotaOutage(503, retryAfter: 120)
+        let outage = CursorQuotaAccountStore(defaults: defaults, vault: outageVault, allowsConnections: true,
+            transport: { try await outageTransport.fetch($0) }, clock: { clock.now })
+        outage.beginLogin(); await settleLogin(outage)
+        check(outage.enabled && outageVault.key != nil, "A completed first login survives unavailable quota services")
+        let outageRequests = await outageTransport.counts
+        outage.refreshDue(force: true); await settle(outage)
+        check(await outageTransport.counts == outageRequests,
+              "Retaining a first login must honor each quota endpoint's Retry-After, including manual refresh")
+        outage.stop()
         guard failures == 0 else { exit(1) }
         print("PASS: owned Cursor PKCE, exact read-RPC boundary, separate monthly/weekly pools, source changes with closed login UI, independent failure, session reuse, late-result rejection and preview isolation")
     }

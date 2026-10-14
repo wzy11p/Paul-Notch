@@ -43,42 +43,12 @@ struct AmbientNotchView: View {
         TimelineView(.periodic(from: .now, by: 5)) { context in
             let state = quotaPresentation(at: context.date)
             ZStack {
+                QuotaOrbReadingBackdrop()
                 QuotaLiquidOrb(value: state.liquidValue, reduceMotion: reduceMotion, motion: orbMotion)
-                    .frame(width: 78, height: 78)
-                if state.service == .doubao {
-                    DoubaoAmbientQuotaView(lines: state.lines, placement: .orb)
-                } else {
-                VStack(spacing: 0) {
-                    HStack(spacing: 5) {
-                        AmbientProviderMark(service: state.service, size: 16, attentive: false,
-                            pressed: false, quiet: true, working: false, pointer: .zero)
-                        if let line = state.lines.first {
-                            Text(line.countdownOnly).font(.system(size: 9, weight: .medium)).foregroundStyle(.white.opacity(0.86))
-                        }
-                    }.frame(height: 20)
-                    if state.service == .cursor, state.lines.count > 1 {
-                        VStack(spacing: 0) {
-                            ForEach(state.lines) { line in
-                                Text("\(line.poolLabel ?? "") \(line.value.text)")
-                                    .font(.system(size: 12, weight: .semibold)).monospacedDigit()
-                            }
-                        }.foregroundStyle(QuotaOverviewPalette.primary).frame(height: 30)
-                    } else {
-                        Text(state.lines.first?.value.text ?? "—")
-                            .font(.system(size: 18, weight: .semibold)).monospacedDigit()
-                            .foregroundStyle(QuotaOverviewPalette.primary)
-                            .lineLimit(1).minimumScaleFactor(0.7)
-                            .frame(height: 30)
-                    }
-                    if let model = state.cursorModel {
-                        Text(model.shortLabel).font(.system(size: 8, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.86)).lineLimit(1)
-                            .frame(height: 12)
-                    } else {
-                        Color.clear.frame(height: 12).accessibilityHidden(true)
-                    }
-                }.frame(width: 62, height: 62).offset(y: -1)
-                }
+                    .frame(width: QuotaFloatingPlacement.orbDiameter, height: QuotaFloatingPlacement.orbDiameter)
+                QuotaOrbReadout(service: state.service, lines: state.lines,
+                                highlightedID: state.cursorModel?.pool?.rawValue,
+                                modelLabel: state.cursorModel?.pool == nil ? nil : state.cursorModel?.shortLabel)
                 if case .running(let count) = state.activity {
                     Text(count > 9 ? "9+" : "\(count)")
                         .font(.system(size: 9, weight: .semibold)).monospacedDigit()
@@ -88,7 +58,8 @@ struct AmbientNotchView: View {
                         .padding(.top, 6).padding(.trailing, 17)
                 }
             }
-            .frame(width: 78, height: 78).clipShape(Circle()).padding(7)
+            .frame(width: QuotaFloatingPlacement.orbDiameter, height: QuotaFloatingPlacement.orbDiameter)
+            .clipShape(Circle()).padding(7)
             .overlay {
                 FloatingQuotaInput(summary: state.summary, onOpen: onOpen, onMove: onMove, onDock: onDock,
                                    motion: orbMotion)
@@ -103,7 +74,7 @@ struct AmbientNotchView: View {
             ZStack {
                 Color.black
                 GeometryReader { geometry in
-                    let inset: CGFloat = presentation.isFrontmostAppFullScreen ? 4 : 5
+                    let inset: CGFloat = presentation.isFrontmostAppFullScreen ? 2 : 3
                     let sideWidth = max(0, (geometry.size.width - inset * 2 - presentation.centerGapWidth) / 2)
                     HStack(spacing: 0) {
                         quotaStrip(state).frame(width: sideWidth)
@@ -148,7 +119,7 @@ struct AmbientNotchView: View {
             .help(state.summary)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(state.summary)
-            .accessibilityHint("悬浮仅 Logo 回应，单击打开，再次单击收起")
+            .accessibilityHint("鼠标进入菜单栏时自动收缩让位，离开立即恢复；单击原生刘海中间或从菜单栏 P 图标打开面板")
             .accessibilityAction(.default, onOpen)
             .preferredColorScheme(.dark)
         }
@@ -156,91 +127,37 @@ struct AmbientNotchView: View {
 
     @ViewBuilder
     private func quotaStrip(_ state: AmbientQuotaPresentation) -> some View {
-        if state.service == .doubao {
-            DoubaoAmbientQuotaView(lines: state.lines, placement: .notchValues,
-                                  isFullScreen: presentation.isFrontmostAppFullScreen)
-        } else if state.lines.isEmpty {
-            HStack(spacing: 5) {
-                Image(systemName: "gauge.with.dots.needle.33percent")
-                    .font(.system(size: compactFontSize, weight: .medium))
-                Text("—")
-                    .font(.system(size: valueFontSize, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-            }
-            .foregroundStyle(IslandTheme.text3)
+        if state.lines.isEmpty {
+            Text("—").font(.system(size: 10, weight: .semibold)).foregroundStyle(IslandTheme.text2)
         } else {
-            if state.lines.count == 1, let quota = state.lines.first {
-                quotaValue(quota)
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(state.lines) { quota in
-                        quotaValue(quota)
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func quotaValue(_ quota: AmbientQuotaLine) -> some View {
-        switch quota.value {
-        case .percent(let value):
-            AmbientQuotaLabel(
-                period: quota.period,
-                remaining: value,
+            QuotaGlanceRows(lines: state.lines, placement: .notchValues,
                 isFullScreen: presentation.isFrontmostAppFullScreen,
-                color: quotaColor(Double(value)),
-                secondaryColor: IslandTheme.text2
-            )
-        case .percentBound(let lower, _):
-            AmbientQuotaLabel(period: quota.period, remaining: lower,
-                isFullScreen: presentation.isFrontmostAppFullScreen, color: quotaColor(Double(lower)),
-                secondaryColor: IslandTheme.text2, comparison: ">")
-        case .unlimited:
-            HStack(alignment: .firstTextBaseline, spacing: 2) {
-                Text(quota.period).font(.system(size: quota.period.count > 2 ? 6 : 7, weight: .medium))
-                    .foregroundStyle(IslandTheme.text2)
-                Text("不限").font(.system(size: presentation.isFrontmostAppFullScreen ? 9 : 10, weight: .semibold))
-                    .foregroundStyle(IslandTheme.text1)
-            }.lineLimit(1).fixedSize()
-        default:
-            Text("—").font(.system(size: valueFontSize)).foregroundStyle(IslandTheme.text2)
+                highlightedID: state.cursorModel?.pool?.rawValue)
         }
     }
 
     private func activityStatus(_ state: AmbientQuotaPresentation) -> some View {
-        if state.service == .doubao {
-            return AnyView(HStack(spacing: 2) {
-                AmbientProviderMark(service: state.service, size: presentation.isFrontmostAppFullScreen ? 10 : 12,
-                    attentive: isHovered, pressed: companionPressed, quiet: true, working: false, pointer: companionPointer)
-                    .frame(width: presentation.isFrontmostAppFullScreen ? 10 : 12)
-                DoubaoAmbientQuotaView(lines: state.lines, placement: .notchResets,
-                                      isFullScreen: presentation.isFrontmostAppFullScreen)
-            })
-        }
-        if let model = state.cursorModel {
-            return AnyView(VStack(spacing: 1) {
-                AmbientProviderMark(service: state.service, size: logoSize, attentive: isHovered,
-                    pressed: companionPressed, quiet: true, working: false, pointer: companionPointer)
-                    .frame(width: logoSize, height: logoSize)
-                Text(model.shortLabel)
-                    .font(.system(size: presentation.isFrontmostAppFullScreen ? 7 : 8, weight: .medium))
-                    .foregroundStyle(IslandTheme.text2).lineLimit(1).minimumScaleFactor(0.85)
-            })
-        }
-        return AnyView(HStack(spacing: presentation.isFrontmostAppFullScreen ? 5 : 7) {
-            AmbientProviderMark(service: state.service, size: logoSize, attentive: isHovered,
-                pressed: companionPressed, quiet: reduceMotion || presentation.isFrontmostAppFullScreen,
-                working: state.activity.isWorking, pointer: companionPointer)
-                .frame(width: presentation.isFrontmostAppFullScreen ? 12 : 16,
-                       height: presentation.isFrontmostAppFullScreen ? 12 : 16)
-            if let count = state.activity.displayCount {
-                Text(count)
-                    .font(.system(size: valueFontSize, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(state.activity.isWorking ? IslandTheme.text1 : IslandTheme.text2)
+        HStack(spacing: 4) {
+            HStack(spacing: 4) {
+                AmbientProviderMark(service: state.service, size: presentation.isFrontmostAppFullScreen ? 10 : 13,
+                    attentive: isHovered, pressed: companionPressed,
+                    quiet: reduceMotion || presentation.isFrontmostAppFullScreen,
+                    working: state.activity.isWorking, pointer: companionPointer)
+                    .frame(width: presentation.isFrontmostAppFullScreen ? 10 : 13,
+                           height: presentation.isFrontmostAppFullScreen ? 10 : 13)
+                if case .running(let count) = state.activity {
+                    Text(count > 9 ? "9+" : "\(count)")
+                        .font(.system(size: presentation.isFrontmostAppFullScreen ? 9 : 10, weight: .semibold))
+                        .foregroundStyle(.white).monospacedDigit()
+                }
             }
-        })
+            if state.lines.isEmpty {
+                Text("待更新").font(.system(size: 7, weight: .medium)).foregroundStyle(IslandTheme.text2)
+            } else if state.lines.count > 1 {
+                QuotaGlanceRows(lines: state.lines, placement: .notchResets,
+                               isFullScreen: presentation.isFrontmostAppFullScreen)
+            }
+        }
     }
 
     func quotaPresentation(at now: Date) -> AmbientQuotaPresentation {

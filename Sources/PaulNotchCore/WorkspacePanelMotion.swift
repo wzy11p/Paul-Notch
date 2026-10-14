@@ -15,6 +15,7 @@ final class WorkspacePanelMotion {
     private var revision: UInt64 = 0
     private var fallback: Task<Void, Never>?
     private var bubbleMorph: WorkspaceBubbleMorph?
+    private var notchExpansion: WorkspaceNotchExpansion?
     private let animation: Animation
 
     init(animation: @escaping Animation = WorkspacePanelMotion.appKitAnimation) {
@@ -59,6 +60,36 @@ final class WorkspacePanelMotion {
         invalidateCallbacks()
         bubbleMorph?.finish()
         bubbleMorph = nil
+        notchExpansion?.finish()
+        notchExpansion = nil
+    }
+
+    /// One compositor-owned silhouette, anchored to the same physical top as
+    /// the compact notch. Retarget from presentation state on rapid reversal.
+    func expand(_ container: WorkspacePanelContainer, from notch: NSRect, direction: Direction,
+                reduceMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+                completion: @escaping @MainActor () -> Void) {
+        invalidateCallbacks()
+        bubbleMorph?.finish(); bubbleMorph = nil
+        self.direction = direction
+        let ticket = revision
+        let finish: @MainActor () -> Void = { [weak self] in
+            guard let self, self.revision == ticket, self.direction != nil else { return }
+            self.fallback?.cancel(); self.fallback = nil
+            self.notchExpansion?.finish(); self.notchExpansion = nil
+            self.direction = nil
+            completion()
+        }
+        if reduceMotion { finish(); return }
+        if notchExpansion == nil {
+            notchExpansion = WorkspaceNotchExpansion(container: container, notch: notch, opening: direction == .opening)
+        }
+        let duration: TimeInterval = direction == .opening ? 0.26 : 0.18
+        notchExpansion?.animate(opening: direction == .opening, duration: duration)
+        fallback = Task { @MainActor in
+            do { try await Task.sleep(for: .seconds(duration)) } catch { return }
+            finish()
+        }
     }
 
     private func invalidateCallbacks() {
@@ -76,6 +107,7 @@ final class WorkspacePanelMotion {
         // Retarget the existing presentation layers, not a new endpoint image.
         // General cancellation still releases the temporary raster immediately.
         invalidateCallbacks()
+        notchExpansion?.finish(); notchExpansion = nil
         self.direction = direction
         let ticket = revision
         let duration: TimeInterval = reduceMotion ? 0 : (direction == .opening ? 0.38 : 0.32)

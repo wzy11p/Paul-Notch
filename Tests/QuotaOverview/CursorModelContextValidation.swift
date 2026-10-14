@@ -21,7 +21,10 @@ import Foundation
             let chosen = AmbientQuotaPresentation.make(service: .cursor, account: account,
                 resetsAt: now.addingTimeInterval(19 * 86400), observedAt: now,
                 cursorModel: CursorModelSelection.parse(name) ?? .unavailable, at: now)
-            check(chosen.lines.map(\.value) == values, "\(name) selects the matching actual pool")
+            check(chosen.lines.map(\.value) == [.percent(78), .percent(43)],
+                  "\(name) preserves both fixed pools rather than shrinking the reading")
+            check(chosen.liquidValue == (values.count == 1 ? values[0] : nil),
+                  "\(name) waterline selects only the matching actual pool")
             check(chosen.summary.contains("19") && chosen.activity == .notAvailable,
                   "model selection retains reset and does not invent running tasks")
         }
@@ -29,7 +32,8 @@ import Foundation
         absent.pools.removeLast()
         let unavailable = AmbientQuotaPresentation.make(service: .cursor, account: absent,
             cursorModel: CursorModelSelection.parse("Claude Opus 5.5")!, at: now)
-        check(unavailable.lines.isEmpty, "missing selected pool must not fall back to the other quota")
+        check(unavailable.lines.map(\.value) == [.percent(78), .unknown] && unavailable.liquidValue == nil,
+              "missing selected pool cannot borrow the other quota's waterline, but its labeled balance remains available")
         absent.pools = []
         for model in [CursorModelSelection.parse("Claude Opus 5.5")!, .automatic, .unavailable] {
             let noPools = AmbientQuotaPresentation.make(service: .cursor, account: absent, cursorModel: model, at: now)

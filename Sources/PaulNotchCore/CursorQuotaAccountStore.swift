@@ -15,6 +15,7 @@ import Combine
     @Published private(set) var loginError: String?
     @Published private(set) var needsAuthorization = false
     @Published private(set) var keychainBlocked = false
+    @Published private(set) var isDisconnectConfirmationPresented = false
     @Published private(set) var readingProviders: Set<DesktopQuotaProvider> = []
     var isRefreshing: Bool { !readingProviders.isEmpty }
     let allowsConnections: Bool
@@ -62,6 +63,7 @@ import Combine
             return
         }
         let attempt = CursorQuotaLoginAttempt(at: clock())
+        cancelDisconnect()
         loginGeneration += 1
         let revision = loginGeneration
         isLoggingIn = true; loginError = nil; loginURL = attempt.loginURL
@@ -89,11 +91,15 @@ import Combine
                 }
                 guard let pair else { throw QuotaConnectionError.authentication }
                 var verified: [DesktopQuotaProvider: State] = [:]
+                var verifiedRetryUntil: [DesktopQuotaProvider: Date] = [:]
                 // Both calls are read-only. Keep a format/unavailable failure separate
                 // rather than filling it with the other product's valid value.
                 for provider in Self.providers {
                     do {
                         let response = try await transport(CursorQuotaRequest.usage(provider, accessToken: pair.accessToken))
+                        if [429, 503].contains(response.status) {
+                            verifiedRetryUntil[provider] = clock().addingTimeInterval(max(30, response.retryAfter ?? 60))
+                        }
                         try validate(response)
                         verified[provider] = State(snapshot: try CursorQuotaParser.parse(provider, data: response.data, at: clock()))
                     } catch {
@@ -102,11 +108,18 @@ import Combine
                     }
                     guard !Task.isCancelled, revision == loginGeneration else { return }
                 }
-                guard verified.values.contains(where: { $0.snapshot != nil }) else { throw QuotaConnectionError.invalidData }
+                // The official PKCE poll already authenticated this owned login.
+                // A first connection must survive a separate quota outage/format
+                // failure; unknown readings stay unknown and retry after restart.
+                // An unverified replacement still cannot overwrite an old account.
+                guard !enabled || verified.values.contains(where: { $0.snapshot != nil }) else {
+                    throw QuotaConnectionError.invalidData
+                }
                 try vault.save(pair.serialized)
                 guard revision == loginGeneration, !Task.isCancelled else { return }
                 cancelReads()
                 credentials = pair; states = verified; enabled = true
+                failures = [:]; retryUntil = verifiedRetryUntil; rotationRetryUntil = .distantPast
                 needsAuthorization = false; keychainBlocked = false; loginError = nil; loginURL = nil
                 defaults.set(true, forKey: Self.enabledKey)
                 for provider in Self.providers { due[provider] = clock().addingTimeInterval(30) }
@@ -219,14 +232,20 @@ import Combine
         needsAuthorization = true; keychainBlocked = keychain; credentials = nil
         if !keychain { for provider in Self.providers { states[provider] = State(error: "官方登录已失效，请重新连接") } }
     }
-    func disconnect() {
+    func disconnect(confirming: Bool = false) {
+        guard allowsConnections, enabled else { return }
+        guard confirming else { isDisconnectConfirmationPresented = true; return }
+        guard isDisconnectConfirmationPresented else { return }
+        cancelDisconnect()
         stop(); enabled = false; states = [:]; needsAuthorization = false; keychainBlocked = false; loginError = nil
         modelMonitor.setEnabled(false)
         guard allowsConnections else { return }
         defaults.set(false, forKey: Self.enabledKey)
         do { try vault.delete() } catch { loginError = "已停止同步；本机登录凭证未能移除，请重试断开。" }
     }
+    func cancelDisconnect() { isDisconnectConfirmationPresented = false }
     func stop() {
+        cancelDisconnect()
         cancelLogin(); cancelReads(); credentials = nil; due = [:]; retryUntil = [:]
         modelMonitor.stop()
     }
@@ -245,6 +264,8 @@ import Combine
     }
     private static func message(_ error: Error) -> String {
         if case QuotaConnectionError.authentication = error { return "官方登录已失效或尚未完成，请重新登录连接" }
+        if case QuotaConnectionError.invalidData = error { return "额度数据暂时无法识别，不需要因此重复登录；稍后自动重试。" }
+        if case QuotaConnectionError.unavailable = error { return "额度查询暂时不可用，稍后自动重试；已有登录会保留。" }
         return (error as? QuotaConnectionError ?? .unavailable).localizedDescription
     }
     func account(_ provider: DesktopQuotaProvider, now: Date) -> QuotaOverviewAccount {

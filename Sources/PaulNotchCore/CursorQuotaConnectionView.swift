@@ -54,9 +54,16 @@ struct CursorQuotaConnectionView: View {
                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else {
                 if store.enabled {
+                    if !store.needsAuthorization {
+                        Label("登录已保存", systemImage: "checkmark.shield")
+                            .font(.system(size: 12, weight: .medium))
+                    }
                     ForEach([DesktopQuotaProvider.cursor, .grok], id: \.rawValue) { provider in
                         let account = store.account(provider, now: .now)
                         LabeledContent(provider.name, value: account.status == .current ? account.value.text : "尚未获取当前额度")
+                        if account.status != .current, let reason = account.unavailableReason {
+                            Text(reason).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
                 Button {
@@ -74,6 +81,20 @@ struct CursorQuotaConnectionView: View {
                             .buttonStyle(.bordered).controlSize(.large).disabled(store.isRefreshing || store.needsAuthorization)
                         Button("断开这两个服务", role: .destructive) { store.disconnect() }
                             .buttonStyle(.bordered).controlSize(.large)
+                            .disabled(store.isDisconnectConfirmationPresented)
+                            .accessibilityIdentifier("quota-cursor-disconnect-request")
+                    }
+                    if store.isDisconnectConfirmationPresented {
+                        Text("确认断开 Cursor 和 Grok Bot？这会移除 Paul 保存的登录，下次需要重新连接。")
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack {
+                            Button("保留连接") { store.cancelDisconnect() }
+                                .buttonStyle(.bordered).controlSize(.large)
+                                .accessibilityIdentifier("quota-cursor-disconnect-cancel")
+                            Button("确认断开", role: .destructive) { store.disconnect(confirming: true) }
+                                .buttonStyle(.bordered).controlSize(.large)
+                                .accessibilityIdentifier("quota-cursor-disconnect-confirm")
+                        }
                     }
                 }
                 Text("登录凭证只保存在本机专用钥匙串；不读取其他应用的密码、Cookie 或聊天。此凭证本身可能具备更广权限，但 Paul 只请求额度，不调用模型、不消费重置卡、不更改账单。")
@@ -83,6 +104,7 @@ struct CursorQuotaConnectionView: View {
         }
         .font(.system(size: 12))
         .onChange(of: store.loginURL) { if $0 == nil { launcher.cancel(); copiedLink = false } }
+        .onDisappear { store.cancelDisconnect() }
         // Hiding the notch never cancels the owned login poll or reopens Chrome.
     }
     private var loginMessage: String {

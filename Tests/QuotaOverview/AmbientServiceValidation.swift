@@ -59,7 +59,7 @@ import Foundation
                                .init(label: "其他模型", value: .percent(50), timing: "28 天后重置")]
         let cursor = AmbientQuotaPresentation.make(service: .cursor, account: cursorAccount,
             resetsAt: now.addingTimeInterval(28 * 86400), tasksAreFresh: true, runningTaskCount: 12, at: now)
-        check(cursor.lines.map(\.value) == [.percent(81), .percent(50)] && cursor.lines.first?.period == "内28D",
+        check(cursor.lines.map(\.value) == [.percent(81), .percent(50)] && cursor.lines.first?.period == "28D",
               "Cursor's independent monthly pools must not inherit Codex's week/short pool")
         check(cursor.activity == .notAvailable && !cursor.summary.contains("12 个") && !cursor.activity.isWorking,
               "Cursor refresh/foreground does not mean twelve Codex tasks are running in Cursor")
@@ -84,7 +84,7 @@ import Foundation
         check(pair.lines.map(\.value) == [.percent(98), .percent(53)] &&
               pair.lines.map(\.countdownOnly) == ["2H", "6D"],
               "Doubao must show both independent balances and age each reset from the same observation")
-        check(pair.lines.map(\.poolLabel) == ["5h", "7天"] && pair.liquidValue == .percent(53),
+        check(pair.lines.map(\.poolLabel) == ["时段", "总额"] && pair.liquidValue == .percent(53),
               "Identify five-hour versus seven-day total; the orb waterline must use the labeled weekly total, never a blend")
         check(pair.summary.contains("5 小时") && pair.summary.contains("7 天总额") && pair.summary.contains("53%"),
               "VoiceOver and hover must identify both pools rather than repeat the primary quota")

@@ -373,7 +373,7 @@ struct QuotaOverviewAccountCard: View {
 
     var body: some View {
         Button(action: onOpen) {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 7) {
                     if let logo = ProviderBrandAssets.image(for: account.id) {
                         Image(nsImage: logo).renderingMode(.original).resizable().scaledToFit()
@@ -391,37 +391,30 @@ struct QuotaOverviewAccountCard: View {
                             .lineLimit(1).minimumScaleFactor(0.85)
                     }
                 }
-                if account.visiblePools.count == 2 {
                     VStack(alignment: .leading, spacing: 3) {
-                        ForEach(Array(account.visiblePools.enumerated()), id: \.offset) { _, pool in
+                        ForEach(Array(readingPools.enumerated()), id: \.offset) { _, pool in
                             VStack(alignment: .leading, spacing: 1) {
                                 HStack(alignment: .firstTextBaseline, spacing: 3) {
-                                    Text(pool.label).font(.system(size: 9)).foregroundStyle(secondaryColor)
+                                    Text(QuotaGlanceText.poolLabel(provider: account.id, label: pool.label, sourceID: pool.sourceID))
+                                        .font(.system(size: 8)).foregroundStyle(secondaryColor)
                                         .lineLimit(1).minimumScaleFactor(0.8)
                                     Spacer(minLength: 0)
-                                    Text(pool.value.text).font(.system(size: 15, weight: .medium)).monospacedDigit()
+                                    Text(account.displayReason == nil ? pool.value.text : "—")
+                                        .font(.system(size: 16, weight: .medium)).monospacedDigit()
                                         .foregroundStyle(amountColor(pool.value)).lineLimit(1).minimumScaleFactor(0.8)
                                 }
-                                Text(compactTiming(pool.timing)).font(.system(size: 8.5)).foregroundStyle(secondaryColor)
+                                Text(account.displayReason == nil ? compactTiming(pool.timing) : briefStatus)
+                                    .font(.system(size: 8.5)).foregroundStyle(secondaryColor)
                                     .lineLimit(1).minimumScaleFactor(0.8)
                             }.frame(maxWidth: .infinity, alignment: .leading)
                         }
-                    }
-                } else {
-                    Text(account.displayValue).font(.system(size: 23, weight: .medium)).monospacedDigit()
-                        .foregroundStyle(account.displayReason == nil ? amountColor(account.value) : secondaryColor)
-                        .lineLimit(1).minimumScaleFactor(0.6)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(account.displayReason == nil ? compactTiming(account.timing) : briefStatus)
-                        .font(.system(size: 10)).foregroundStyle(secondaryColor)
-                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                }
+                    }.frame(height: 60, alignment: readingPools.count > 1 ? .top : .center)
                 Spacer(minLength: 0)
             }
             .padding(8).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         }
-        .buttonStyle(QuotaBubbleButtonStyle(kind: account.kind, interaction: interaction))
+        .buttonStyle(QuotaBubbleButtonStyle(interaction: interaction))
         .foregroundStyle(QuotaOverviewPalette.primary)
         .help(account.accessibilitySummary)
         .accessibilityLabel(account.accessibilitySummary)
@@ -431,6 +424,10 @@ struct QuotaOverviewAccountCard: View {
 
     private var title: String {
         ["minimax-api", "minimax-audio"].contains(account.id) ? "MiniMax" : account.id == "deepseek" ? "DeepSeek" : account.name
+    }
+    private var readingPools: [QuotaOverviewPool] {
+        if !account.visiblePools.isEmpty { return account.visiblePools }
+        return [.init(label: account.kind == .api ? "余额" : "剩余", value: account.value, timing: account.timing)]
     }
     private var caption: String {
         switch account.id {
@@ -453,15 +450,10 @@ struct QuotaOverviewAccountCard: View {
         }
     }
     private func compactTiming(_ timing: String) -> String {
-        timing.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "小时", with: "时")
-            .replacingOccurrences(of: "分钟", with: "分")
+        QuotaGlanceText.timing(timing)
     }
     private var secondaryColor: Color {
-        switch account.kind {
-        case .membership: Color(white: 0.78)
-        case .api: Color(red: 0.70, green: 0.80, blue: 0.88)
-        case .audio: Color(red: 0.82, green: 0.78, blue: 0.88)
-        }
+        Color(.sRGB, red: 0.72, green: 0.73, blue: 0.75)
     }
     private func amountColor(_ value: QuotaOverviewValue) -> Color {
         guard account.displayReason == nil, let fraction = value.fraction else { return QuotaOverviewPalette.primary }
@@ -471,9 +463,9 @@ struct QuotaOverviewAccountCard: View {
     }
 }
 
-/// A quiet convex surface, not per-card WebKit/blur or an idle decorative effect.
+/// One smoky graphite surface for every service. Brand artwork and captions
+/// identify the provider; color remains reserved for quota warnings.
 private struct QuotaBubbleButtonStyle: ButtonStyle {
-    let kind: QuotaOverviewKind
     var interaction: QuotaCardInteraction? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
@@ -481,15 +473,15 @@ private struct QuotaBubbleButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         let pressed = interaction?.pressed ?? configuration.isPressed
         let hovered = interaction?.hovered ?? isHovered
-        let lift = interaction?.lifted == true ? 0.065 : pressed ? -0.025 : hovered ? 0.035 : 0
+        let lift = interaction?.lifted == true ? 0.048 : pressed ? -0.025 : hovered ? 0.035 : 0
         configuration.label
             .background {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .fill(LinearGradient(colors: [surface(lift: lift + 0.035), surface(lift: lift - 0.015)],
+                    .fill(LinearGradient(colors: [surface(lift: lift + 0.012), surface(lift: lift - 0.006)],
                                          startPoint: .topLeading, endPoint: .bottomTrailing))
                     .overlay {
                         RoundedRectangle(cornerRadius: 24, style: .continuous)
-                            .strokeBorder(LinearGradient(colors: [.white.opacity(pressed ? 0.08 : 0.20),
+                            .strokeBorder(LinearGradient(colors: [.white.opacity(pressed ? 0.08 : 0.12),
                                 .white.opacity(0.025)], startPoint: .top, endPoint: .bottom), lineWidth: 0.7)
                     }
                     .shadow(color: .black.opacity(pressed ? 0.05 : 0.12), radius: pressed ? 1 : 2.5, x: 0, y: pressed ? 0 : 1.5)
@@ -501,11 +493,7 @@ private struct QuotaBubbleButtonStyle: ButtonStyle {
     }
 
     private func surface(lift: Double) -> Color {
-        switch kind {
-        case .membership: Color(white: 0.22 + lift)
-        case .api: Color(red: 0.16 + lift, green: 0.22 + lift, blue: 0.28 + lift)
-        case .audio: Color(red: 0.24 + lift, green: 0.19 + lift, blue: 0.28 + lift)
-        }
+        Color(.sRGB, red: 32.0 / 255 + lift, green: 33.0 / 255 + lift, blue: 36.0 / 255 + lift)
     }
 }
 
@@ -561,15 +549,17 @@ enum QuotaOverviewPalette {
     static let surface = Color(white: 0.19)
 }
 
-/// A restrained native material rim; quota text stays on opaque reading surfaces.
+/// One native frosted surface under a black tint. Keep the bezel transition
+/// near-black even over a bright desktop; do not paint an opaque graphite slab.
 struct QuotaPanelBackdrop: View {
+    var isDocked = false
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     var body: some View {
-        RoundedRectangle(cornerRadius: 22, style: .continuous)
+        WorkspaceSurfaceShape(isDocked: isDocked)
             .fill(.regularMaterial)
             .overlay {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(Color(white: 0.14).opacity(reduceTransparency ? 1 : 0.82))
+                WorkspaceSurfaceShape(isDocked: isDocked)
+                    .fill(reduceTransparency ? Color(white: 0.015) : Color.black.opacity(0.92))
             }
             .allowsHitTesting(false).accessibilityHidden(true)
     }

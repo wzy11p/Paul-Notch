@@ -72,6 +72,17 @@ struct AmbientQuotaLine: Identifiable, Equatable {
         if let poolLabel, period.hasPrefix(poolLabel) { return String(period.dropFirst(poolLabel.count)) }
         return period
     }
+    var resetText: String {
+        if let date = resetCalendarCaption { return "\(date)重置" }
+        return QuotaGlanceText.countdown(countdownOnly)
+    }
+    var compactLabel: String { QuotaGlanceText.compactPool(poolLabel ?? "剩余") }
+    var compactResetText: String { resetCalendarCaption ?? QuotaGlanceText.compactCountdown(countdownOnly) }
+    var readingExplanation: String {
+        let name = DoubaoQuotaWindow(rawValue: id)?.title ?? poolLabel ?? "剩余额度"
+        return "\(compactLabel)＝\(name)，剩余 \(displayValue)，\(resetDescription ?? resetText)"
+    }
+    var displayValue: String { value == .unknown ? "—" : value.text }
 }
 
 /// These are two limits on the same membership, not two accounts. Stable
@@ -79,7 +90,7 @@ struct AmbientQuotaLine: Identifiable, Equatable {
 enum DoubaoQuotaWindow: String, CaseIterable {
     case short = "doubao.short", weekly = "doubao.weekly"
     var title: String { self == .short ? "5 小时" : "7 天总额" }
-    var marker: String { self == .short ? "5h" : "7天" }
+    var marker: String { self == .short ? "时段" : "总额" }
     func matches(_ pool: QuotaOverviewPool) -> Bool {
         if let sourceID = pool.sourceID { return sourceID == rawValue }
         return self == .short ? pool.label == "当前时段" : pool.label == "近 7 天"
@@ -103,7 +114,13 @@ struct AmbientQuotaPresentation {
                   Self.isMembershipValue(value) else { return nil }
             return value
         }
-        return service == .cursor && lines.count != 1 ? nil : lines.first?.value
+        if service == .cursor {
+            guard let pool = cursorModel?.pool,
+                  let value = lines.first(where: { $0.id == pool.rawValue })?.value,
+                  Self.isMembershipValue(value) else { return nil }
+            return value
+        }
+        return lines.first?.value
     }
 
     static func make(service: AmbientQuotaService, account: QuotaOverviewAccount,
@@ -122,7 +139,8 @@ struct AmbientQuotaPresentation {
                 lines = codexWindows.filter { $0.remainingPercent.isFinite && !($0.resetsAt.map { $0 <= now } ?? false) }
                     .sorted { rank($0) < rank($1) }.prefix(2).map {
                         .init(id: $0.id, period: QuotaResetCountdown.shortLabel(windowDurationMinutes: $0.windowDurationMinutes,
-                            resetsAt: $0.resetsAt, at: now), value: .percent(Int($0.remainingPercent.rounded())))
+                            resetsAt: $0.resetsAt, at: now), value: .percent(Int($0.remainingPercent.rounded())),
+                              poolLabel: QuotaGlanceText.poolLabel(provider: "codex", label: $0.shortName))
                     }
             } else if service == .doubao {
                 lines = doubaoLines(account, observedAt: observedAt, at: now)
@@ -137,25 +155,28 @@ struct AmbientQuotaPresentation {
                             guard let kind = CursorModelPool(rawValue: id), isMembershipValue(pool.value) else { return nil }
                             return (kind, pool.value)
                         }
-                        let chosen = pools.filter { cursorModel.pool == nil || $0.0 == cursorModel.pool }
+                        // Selecting a model highlights its pool; it must not
+                        // remove/reflow the other genuine balance.
+                        let chosen = pools.sorted { $0.0 == .cursor && $1.0 != .cursor }
                         let unique = Set(chosen.map { $0.0.rawValue }).count == chosen.count
                         if chosen.isEmpty || !unique { reason = "当前模型对应的额度尚未返回" }
                         else {
-                            lines = chosen.map { kind, value in
-                                .init(id: kind.rawValue, period: chosen.count > 1 ? kind.marker + period : period,
-                                      value: value, poolLabel: chosen.count > 1 ? kind.marker : nil)
+                            lines = [CursorModelPool.cursor, .other].map { kind in
+                                let value = chosen.first { $0.0 == kind }?.1 ?? .unknown
+                                return .init(id: kind.rawValue, period: period, value: value,
+                                      poolLabel: QuotaGlanceText.poolLabel(provider: "cursor", label: kind.rawValue))
                             }
                         }
-                    } else { lines = [.init(id: service.rawValue, period: period, value: account.value)] }
+                    } else { lines = [.init(id: service.rawValue, period: period, value: account.value, poolLabel: "剩余")] }
                 }
             }
         }
         if !correctSource || !observedIsFresh { reason = reason ?? "尚未获得该服务的当前额度" }
         let quota = lines.isEmpty ? "额度暂不可用，\(reason ?? "等待有效数据")" : lines.map { line in
             if let window = DoubaoQuotaWindow(rawValue: line.id) {
-                return "\(window.title)剩余 \(line.value == .unknown ? "待确认" : line.value.text)，\(line.resetDescription ?? "未提供重置时间")，重置倒计时 \(line.period)"
+                return "\(line.compactLabel)＝\(window.title)剩余 \(line.value == .unknown ? "待确认" : line.value.text)，\(line.resetDescription ?? "未提供重置时间")，重置倒计时 \(line.resetText)"
             }
-            return "\(line.value.text)剩余，\(line.period)重置倒计时"
+            return line.readingExplanation
         }.joined(separator: "；")
         let tasks: String
         switch activity {
@@ -164,10 +185,10 @@ struct AmbientQuotaPresentation {
         case .unknown: tasks = "\(service.name) 任务状态尚未同步"
         case .notAvailable: tasks = "\(service.name) 任务状态暂未接入，不显示猜测数量"
         }
-        let modelSummary = service == .cursor ? "；\(cursorModel.explanation)；内指 Cursor Models，外指 Other Models" :
+        let modelSummary = service == .cursor ? "；\(cursorModel.explanation)；Cursor 指 Cursor Models，其他指 Other Models" :
             service == .doubao ? "；球内水位表示 7 天总额；两个额度独立更新和重置" : ""
         return .init(service: service, lines: lines, activity: activity,
-            summary: "\(service.name)，\(quota)，\(account.id == service.rawValue ? account.timing : "重置时间暂不可用")，\(tasks)\(modelSummary)",
+            summary: "\(service.name)，\(quota)，\(account.id == service.rawValue ? account.timing : "重置时间暂不可用")，\(tasks)\(modelSummary)；D＝天，H＝小时，M＝分钟，P＝尚未计时",
             cursorModel: service == .cursor ? cursorModel : nil)
     }
     private static func doubaoLines(_ account: QuotaOverviewAccount, observedAt: Date?, at now: Date) -> [AmbientQuotaLine] {

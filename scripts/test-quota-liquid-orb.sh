@@ -4,6 +4,10 @@ orb_root="${0:A:h:h}"
 cd "$orb_root"
 orb_output=$(mktemp -d /tmp/paul-quota-orb.XXXXXX)
 print -r -- "Evidence: $orb_output"
+swiftc -O -DQUOTA_WATER_CHECKS Sources/PaulNotchCore/QuotaParticleLiquid.swift \
+  Sources/PaulNotchCore/QuotaOrbSlosh.swift Tests/WindowValidation/QuotaParticleWaterValidation.swift \
+  -o "$orb_output/validate-particles"
+"$orb_output/validate-particles"
 swift build --disable-sandbox
 orb_bin=$(swift build --disable-sandbox --show-bin-path)
 orb_objects=("$orb_bin"/PaulNotchCore.build/*.swift.o)

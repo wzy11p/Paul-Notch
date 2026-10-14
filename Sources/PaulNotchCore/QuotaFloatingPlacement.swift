@@ -3,7 +3,8 @@ import SwiftUI
 
 /// Nonsecret placement only. The existing stores remain the sole quota readers.
 @MainActor final class QuotaFloatingPlacement {
-    static let bubbleSize = NSSize(width: 92, height: 92)
+    static let orbDiameter: CGFloat = 78
+    static let bubbleSize = NSSize(width: orbDiameter + 14, height: orbDiameter + 14)
     private struct Saved: Codable {
         let display: UInt32
         let x, y: Double
@@ -50,8 +51,11 @@ import SwiftUI
         return WorkspacePanelGeometry.bounded(frame, on: screen.visibleFrame, minimumSize: minimumSize)
     }
 
-    static func shouldDock(_ frame: NSRect, on screen: NSRect) -> Bool {
-        abs(frame.midX - screen.midX) <= 120 && frame.maxY >= screen.maxY - 28
+    static func shouldDock(_ frame: NSRect, near notch: NSRect, reachableTop: CGFloat) -> Bool {
+        // Native dragging may stop below the menu band. A small magnetic margin
+        // accepts that reachable edge; the final position is still the true top.
+        abs(frame.midX - notch.midX) <= min(120, notch.width / 2)
+            && frame.maxY >= min(notch.minY, reachableTop) - 8
     }
 
     static func boundedBubble(center: NSPoint, on bounds: NSRect) -> NSRect {
@@ -77,8 +81,8 @@ struct FloatingQuotaInput: NSViewRepresentable {
         view.onOpen = onOpen; view.onMove = onMove; view.onDock = onDock
         view.motion = motion
         view.setAccessibilityLabel(summary)
-        view.setAccessibilityHelp("单击展开；拖动移动；拖回屏幕顶部中央恢复刘海")
-        view.toolTip = summary
+        view.setAccessibilityHelp("单击展开；双击回到刘海；拖动移动；右键也可选择回到刘海")
+        view.toolTip = summary + "\n单击展开 · 双击回到刘海 · 右键显示菜单"
     }
     static func dismantleNSView(_ view: FloatingQuotaInputView, coordinator: ()) { view.cancelTracking() }
 }
@@ -93,6 +97,7 @@ struct FloatingQuotaInput: NSViewRepresentable {
     private var startPoint: NSPoint?
     private var destinationScreen: NSScreen?
     private var isDragging = false
+    private var pendingOpen: Task<Void, Never>?
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var acceptsFirstResponder: Bool { true }
     override init(frame: NSRect) {
@@ -104,17 +109,20 @@ struct FloatingQuotaInput: NSViewRepresentable {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
-        guard !isHidden, hypot(local.x - bounds.midX, local.y - bounds.midY) <= 39 else { return nil }
+        guard !isHidden, hypot(local.x - bounds.midX, local.y - bounds.midY) <= QuotaFloatingPlacement.orbDiameter / 2 else { return nil }
         return self
     }
     override func resetCursorRects() { addCursorRect(bounds.insetBy(dx: 7, dy: 7), cursor: .openHand) }
     override func mouseDown(with event: NSEvent) {
         guard let window, window.isVisible, !window.ignoresMouseEvents, event.window === window else { return }
-        cancelTracking()
+        cancelPendingOpen()
+        // A new grab after mouse-up must inherit the liquid's remaining
+        // momentum. Only an abandoned, still-owned gesture needs cancellation.
+        if startFrame != nil { cancelTracking() }
         startFrame = window.frame
         startPoint = window.convertPoint(toScreen: event.locationInWindow)
         destinationScreen = window.screen ?? NSScreen.main
-        motion?.begin(x: window.frame.midX, at: event.timestamp)
+        motion?.begin(position: CGPoint(x: window.frame.midX, y: window.frame.midY), at: event.timestamp)
     }
     override func mouseDragged(with event: NSEvent) {
         guard let window, event.window === window, let startFrame, let startPoint else { return }
@@ -126,10 +134,10 @@ struct FloatingQuotaInput: NSViewRepresentable {
         guard let destinationScreen else { return }
         let center = NSPoint(x: startFrame.midX + delta.x, y: startFrame.midY + delta.y)
         window.setFrame(QuotaFloatingPlacement.boundedBubble(center: center, on: destinationScreen.frame), display: true)
-        motion?.move(x: window.frame.midX, at: event.timestamp)
+        motion?.move(position: CGPoint(x: window.frame.midX, y: window.frame.midY), at: event.timestamp)
     }
     override func mouseUp(with event: NSEvent) {
-        guard startFrame != nil, let window else { return }
+        guard startFrame != nil, let window, event.window === window else { return }
         mouseDragged(with: event)
         let dragged = isDragging
         let screen = destinationScreen
@@ -138,24 +146,49 @@ struct FloatingQuotaInput: NSViewRepresentable {
         else { motion?.cancel() }
         startFrame = nil; startPoint = nil; destinationScreen = nil; isDragging = false
         if dragged, let screen { onMove(frame, screen) }
-        else if hypot(event.locationInWindow.x - bounds.midX, event.locationInWindow.y - bounds.midY) <= 39 { onOpen() }
+        else if hypot(event.locationInWindow.x - bounds.midX, event.locationInWindow.y - bounds.midY) <= QuotaFloatingPlacement.orbDiameter / 2 {
+            if event.clickCount == 2 { onDock() }
+            else if event.clickCount == 1 { scheduleOpen(in: window) }
+        }
     }
+    private func scheduleOpen(in window: NSWindow) {
+        cancelPendingOpen()
+        // Opening immediately unmounts this input, swallowing the second click.
+        // One cancellable deadline respects the owner's macOS click speed;
+        // there is no polling or work between clicks.
+        let delay = UInt64(NSEvent.doubleClickInterval * 1_000_000_000)
+        pendingOpen = Task { @MainActor [weak self, weak window] in
+            do { try await Task.sleep(nanoseconds: delay) } catch { return }
+            guard let self, let window, self.window === window, window.isVisible,
+                  !window.ignoresMouseEvents, !self.isHiddenOrHasHiddenAncestor else { return }
+            self.pendingOpen = nil
+            self.onOpen()
+        }
+    }
+    private func cancelPendingOpen() { pendingOpen?.cancel(); pendingOpen = nil }
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { cancelTracking() } else { super.keyDown(with: event) }
     }
     override func rightMouseDown(with event: NSEvent) {
-        let menu = NSMenu()
-        let item = menu.addItem(withTitle: "放回顶部刘海", action: #selector(dockFromMenu), keyEquivalent: "")
-        item.target = self
+        cancelTracking()
+        guard let menu = menu(for: event) else { return }
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+        let item = menu.addItem(withTitle: "回到刘海", action: #selector(dockFromMenu), keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: "arrow.up.to.line.compact", accessibilityDescription: nil)
+        item.target = self
+        return menu
+    }
     @objc private func dockFromMenu() { cancelTracking(); onDock() }
-    override func accessibilityPerformPress() -> Bool { onOpen(); return true }
+    override func accessibilityPerformPress() -> Bool { cancelTracking(); onOpen(); return true }
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow == nil { cancelTracking() }
         super.viewWillMove(toWindow: newWindow)
     }
     func cancelTracking() {
+        cancelPendingOpen()
         motion?.cancel()
         if let startFrame { window?.setFrame(startFrame, display: true) }
         startFrame = nil; startPoint = nil; destinationScreen = nil; isDragging = false

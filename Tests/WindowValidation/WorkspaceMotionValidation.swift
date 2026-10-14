@@ -1,5 +1,6 @@
 import AppKit
 import QuartzCore
+@testable import PaulNotchCore
 
 /// Inject only AppKit's animation/completion boundary to drop, delay, duplicate,
 /// and reorder callbacks. The real-window suite separately exercises AppKit.

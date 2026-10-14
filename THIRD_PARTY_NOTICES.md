@@ -1,5 +1,69 @@
 # Third-Party Notices
 
+## Ten Minute Physics — 2D FLIP water
+
+`Sources/PaulNotchCore/QuotaParticleLiquid.swift` adapts particle/grid velocity
+transfer, particle separation, density estimation and pressure projection from
+`tenMinutePhysics/18-flip.html` in https://github.com/matthias-research/pages,
+commit `b5239f60d0a3d0b9b57db0db25a85374ccc84aee`.
+
+Changes: native Swift arrays, fixed-size circular vessel, tangential contact,
+bounded scheduling and sleep, small density/velocity reconstruction mask, native idle bubbles and gradual flattening.
+No JavaScript/WebGL runtime or upstream rendering framework is included.
+
+MIT License
+
+Copyright 2022 Matthias Müller - Ten Minute Physics
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## CodexBar Muse AI protocol
+
+`MuseSubscriptionScript` adapts bounded Next server-action discovery and the
+read-only consumer Muse subscription protocol from `museai.js` (PR #4042).
+Source: https://github.com/steipete/CodexBar/pull/4042
+Paul does not include CodexBar's browser-cookie import, plugin runtime or CLI.
+Requests remain in Paul's own independently authenticated WebKit profile;
+only selected quota fields leave that container.
+
+MIT License
+
+Copyright (c) 2026 Peter Steinberger
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## TO-DO Panel
 
 Native workspace components include adaptations identified in source comments.
