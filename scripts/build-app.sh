@@ -21,6 +21,10 @@ app_dir="$root_dir/dist/Paul Notch.app"
 rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$root_dir/.build/release/PaulNotch" "$app_dir/Contents/MacOS/PaulNotch"
+# Discard development/local symbol names only, before signing. Keep the
+# unstripped .build product for diagnostics; runtime sections and artwork stay
+# byte-identical (verified by test-release-package.sh).
+xcrun strip -S -x "$app_dir/Contents/MacOS/PaulNotch"
 cp "$root_dir/Resources/Info.plist" "$app_dir/Contents/Info.plist"
 cp "$root_dir/Resources/PkgInfo" "$app_dir/Contents/PkgInfo"
 cp "$root_dir/Resources/PaulNotch.icns" "$app_dir/Contents/Resources/PaulNotch.icns"
